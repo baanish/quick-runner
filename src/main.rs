@@ -1,5 +1,5 @@
 use std::{
-    env,
+    env, fs,
     io::{self, Write},
     process::{Command, ExitCode},
     time::Instant,
@@ -8,12 +8,19 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
 use quick_runner::{
-    ai, commands,
+    ai,
+    ai::providers::AiProtocol,
+    commands,
     commands::{alias::AliasCommand, go::GoResult},
-    config::{AppConfig, config_file_path},
+    config::{
+        AgentConfig, AiConfig, AppConfig, DoConfig, FallbackAiConfig, GeneralConfig,
+        ProjectsConfig, StatsConfig, config_file_path,
+    },
     scanner, shell,
     stats_db::{CommandStats, StatsDb},
 };
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 #[derive(Parser)]
 #[command(name = "qr", version, about = "QuickRunner")]
@@ -232,34 +239,35 @@ fn execute_init(config: &AppConfig, args: InitArgs) -> Result<()> {
             roots.push(trimmed.to_string());
         }
 
-        // Build config with user-provided roots
-        let roots_toml: Vec<String> = roots.iter().map(|r| format!("\"{r}\"")).collect();
-        let config_content = format!(
-            r#"[general]
-default_run_mode = "output"
+        println!();
+        println!("Now let's configure your AI provider.");
+        let ai_config = prompt_ai_config("primary")?;
 
-[projects]
-roots = [{roots}]
-scan_depth = 2
-scan_interval_hours = 1
-
-[ai]
-protocol = "openai"
-base_url = "https://api.fireworks.ai/inference/v1"
-model = "accounts/fireworks/models/llama-v3p1-70b-instruct"
-api_key_env = "QR_API_KEY"
-
-[stats]
-enabled = false
-db_path = "__default__"
-"#,
-            roots = roots_toml.join(", ")
-        );
+        let config_content = toml::to_string_pretty(&AppConfig {
+            general: GeneralConfig {
+                default_run_mode: "output".into(),
+            },
+            projects: ProjectsConfig {
+                roots,
+                scan_depth: 2,
+                scan_interval_hours: 1,
+            },
+            ai: ai_config,
+            stats: StatsConfig {
+                enabled: false,
+                db_path: "__default__".into(),
+            },
+            do_config: DoConfig {
+                auto_approve: DoConfig::default().auto_approve,
+                agents: AgentConfig::default(),
+            },
+        })?;
 
         if let Some(parent) = config_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent)?;
         }
-        std::fs::write(&config_path, &config_content)?;
+        fs::write(&config_path, &config_content)?;
+        restrict_config_permissions(&config_path)?;
         println!("created {}", config_path.display());
     } else {
         println!("config already present at {}", config_path.display());
@@ -282,6 +290,126 @@ db_path = "__default__"
 
     let cache = scanner::scan_projects(&effective_config)?;
     println!("initial scan found {} projects", cache.projects.len());
+    Ok(())
+}
+
+fn prompt_ai_config(label: &str) -> Result<AiConfig> {
+    let protocol = prompt_protocol(label)?;
+    let base_url = prompt_with_default(&format!("{label} base URL"), protocol.default_base_url())?;
+    let model = prompt_required(&format!("{label} model name"))?;
+    let api_key = prompt_required(&format!("{label} API key"))?;
+    let api_key_env = prompt_with_default(
+        &format!("{label} API key env var override"),
+        protocol.default_api_key_env(),
+    )?;
+
+    let fallback = if prompt_bool("Configure a fallback provider?", false)? {
+        Some(prompt_fallback_ai_config()?)
+    } else {
+        None
+    };
+
+    Ok(AiConfig {
+        protocol,
+        base_url,
+        model,
+        api_key,
+        api_key_env,
+        fallback,
+    })
+}
+
+fn prompt_fallback_ai_config() -> Result<FallbackAiConfig> {
+    let protocol = prompt_protocol("fallback")?;
+    let base_url = prompt_with_default("fallback base URL", protocol.default_base_url())?;
+    let model = prompt_required("fallback model name")?;
+    let api_key = prompt_required("fallback API key")?;
+    let api_key_env = prompt_with_default(
+        "fallback API key env var override",
+        protocol.default_api_key_env(),
+    )?;
+
+    Ok(FallbackAiConfig {
+        protocol,
+        base_url,
+        model,
+        api_key,
+        api_key_env,
+    })
+}
+
+fn prompt_protocol(label: &str) -> Result<AiProtocol> {
+    loop {
+        let raw = prompt_with_default(
+            &format!("{label} protocol (openai-compatible or anthropic-compatible)"),
+            "openai-compatible",
+        )?;
+        match normalize_protocol_input(&raw) {
+            Ok(protocol) => return Ok(protocol),
+            Err(error) => println!("{error}"),
+        }
+    }
+}
+
+fn normalize_protocol_input(raw: &str) -> Result<AiProtocol> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "openai" | "openai-compatible" => Ok(AiProtocol::OpenAi),
+        "anthropic" | "anthropic-compatible" => Ok(AiProtocol::Anthropic),
+        other => Err(anyhow!(
+            "Unsupported protocol '{other}'. Use openai-compatible or anthropic-compatible."
+        )),
+    }
+}
+
+fn prompt_required(label: &str) -> Result<String> {
+    loop {
+        let value = prompt(label)?;
+        if !value.trim().is_empty() {
+            return Ok(value);
+        }
+        println!("{label} is required.");
+    }
+}
+
+fn prompt_with_default(label: &str, default: &str) -> Result<String> {
+    let value = prompt(&format!("{label} [{default}]"))?;
+    if value.trim().is_empty() {
+        Ok(default.to_string())
+    } else {
+        Ok(value)
+    }
+}
+
+fn prompt_bool(label: &str, default: bool) -> Result<bool> {
+    let default_label = if default { "y" } else { "n" };
+
+    loop {
+        let value = prompt(&format!("{label} (y/n) [{default_label}]"))?;
+        let trimmed = value.trim().to_ascii_lowercase();
+        match trimmed.as_str() {
+            "" => return Ok(default),
+            "y" | "yes" => return Ok(true),
+            "n" | "no" => return Ok(false),
+            _ => println!("Please enter y or n."),
+        }
+    }
+}
+
+fn prompt(label: &str) -> Result<String> {
+    print!("{label}: ");
+    io::stdout().flush()?;
+    let mut line = String::new();
+    io::stdin().read_line(&mut line)?;
+    Ok(line.trim().to_string())
+}
+
+fn restrict_config_permissions(path: &std::path::Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let permissions = fs::Permissions::from_mode(0o600);
+        fs::set_permissions(path, permissions)?;
+    }
+
     Ok(())
 }
 

@@ -8,15 +8,17 @@ scan_interval_hours = 1
 
 [ai]
 protocol = "openai"
-base_url = "https://api.fireworks.ai/inference/v1"
-model = "accounts/fireworks/models/llama-v3p1-70b-instruct"
-api_key_env = "QR_API_KEY"
+base_url = "https://api.openai.com/v1"
+model = ""
+api_key = ""
+api_key_env = "OPENAI_API_KEY"
 
 [ai.fallback]
 protocol = "openai"
-base_url = "https://api.cerebras.ai/v1"
-model = "llama3.1-70b"
-api_key_env = "QR_FALLBACK_API_KEY"
+base_url = "https://api.openai.com/v1"
+model = ""
+api_key = ""
+api_key_env = "OPENAI_API_KEY"
 
 [stats]
 enabled = false

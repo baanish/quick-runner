@@ -67,7 +67,9 @@ pub fn execute(config: &AppConfig, client: &AiClient, task: &str) -> Result<DoRe
             let command = parsed
                 .command
                 .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| anyhow!("AI classified task as inline but did not return a command"))?;
+                .ok_or_else(|| {
+                    anyhow!("AI classified task as inline but did not return a command")
+                })?;
             print_inline_preview(&command, parsed.reason.as_deref())?;
             let executed = confirm_inline_execution(command.as_str(), config)?;
             let exit_code = if executed {
@@ -83,7 +85,8 @@ pub fn execute(config: &AppConfig, client: &AiClient, task: &str) -> Result<DoRe
             }
         }
         ClassificationKind::Delegate => {
-            let suggestions = build_delegate_suggestions(&config.do_config.agents, task, profile.as_ref());
+            let suggestions =
+                build_delegate_suggestions(&config.do_config.agents, task, profile.as_ref());
             print_delegate_suggestions(&suggestions, parsed.reason.as_deref())?;
             DoOutcome::Delegate { suggestions }
         }
@@ -158,18 +161,18 @@ fn build_delegate_suggestions(
     profile: Option<&ProjectProfile>,
 ) -> Vec<String> {
     let escaped = shell_quote(task);
-    let mut suggestions = if profile.and_then(|value| value.prefer_agent.as_deref()) == Some("claude")
-    {
-        vec![
-            format!("{} {}", agents.claude, escaped),
-            format!("{} {}", agents.codex, escaped),
-        ]
-    } else {
-        vec![
-            format!("{} {}", agents.codex, escaped),
-            format!("{} {}", agents.claude, escaped),
-        ]
-    };
+    let mut suggestions =
+        if profile.and_then(|value| value.prefer_agent.as_deref()) == Some("claude") {
+            vec![
+                format!("{} {}", agents.claude, escaped),
+                format!("{} {}", agents.codex, escaped),
+            ]
+        } else {
+            vec![
+                format!("{} {}", agents.codex, escaped),
+                format!("{} {}", agents.claude, escaped),
+            ]
+        };
     suggestions.dedup();
     suggestions
 }
@@ -224,11 +227,13 @@ mod tests {
             prefer_agent: Some("claude".into()),
             entry_points: vec![],
         };
-        let suggestions = build_delegate_suggestions(&AgentConfig::default(), "refactor auth", Some(&profile));
+        let suggestions =
+            build_delegate_suggestions(&AgentConfig::default(), "refactor auth", Some(&profile));
         assert!(suggestions[0].starts_with("claude "));
 
         profile.prefer_agent = None;
-        let suggestions = build_delegate_suggestions(&AgentConfig::default(), "refactor auth", Some(&profile));
+        let suggestions =
+            build_delegate_suggestions(&AgentConfig::default(), "refactor auth", Some(&profile));
         assert!(suggestions[0].starts_with("codex "));
     }
 }

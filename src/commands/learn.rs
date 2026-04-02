@@ -33,7 +33,10 @@ pub fn print_summary(result: &LearnResult) {
         println!("  → Scripts: {}", names.join(", "));
     }
     if !result.profile.entry_points.is_empty() {
-        println!("  → Entry points: {}", result.profile.entry_points.join(", "));
+        println!(
+            "  → Entry points: {}",
+            result.profile.entry_points.join(", ")
+        );
     }
     println!("✅ Saved to {}", result.profile_path.display());
 }

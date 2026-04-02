@@ -83,7 +83,10 @@ pub fn load_profile_from(root: &Path) -> Result<ProjectProfile> {
 
 pub fn discover_project_root(start: &Path) -> PathBuf {
     for candidate in start.ancestors() {
-        if PROJECT_MARKERS.iter().any(|marker| candidate.join(marker).exists()) {
+        if PROJECT_MARKERS
+            .iter()
+            .any(|marker| candidate.join(marker).exists())
+        {
             return candidate.to_path_buf();
         }
     }
@@ -147,9 +150,21 @@ fn detect_node_profile(root: &Path) -> Result<ProjectProfile> {
         language: Some("typescript".into()),
         framework,
         package_manager: package_manager.clone(),
-        test_command: qualify_script_command(package_manager.as_deref(), "test", test_script.as_deref()),
-        build_command: qualify_script_command(package_manager.as_deref(), "build", build_script.as_deref()),
-        lint_command: qualify_script_command(package_manager.as_deref(), "lint", lint_script.as_deref()),
+        test_command: qualify_script_command(
+            package_manager.as_deref(),
+            "test",
+            test_script.as_deref(),
+        ),
+        build_command: qualify_script_command(
+            package_manager.as_deref(),
+            "build",
+            build_script.as_deref(),
+        ),
+        lint_command: qualify_script_command(
+            package_manager.as_deref(),
+            "lint",
+            lint_script.as_deref(),
+        ),
         scripts,
         prefer_agent: None,
         entry_points: detect_node_entry_points(root),
@@ -305,7 +320,13 @@ fn detect_package_manager(json: &JsonValue, root: &Path) -> Option<String> {
     let explicit = json
         .get("packageManager")
         .and_then(JsonValue::as_str)
-        .map(|value| value.split('@').next().unwrap_or(value).to_ascii_lowercase());
+        .map(|value| {
+            value
+                .split('@')
+                .next()
+                .unwrap_or(value)
+                .to_ascii_lowercase()
+        });
     if explicit.is_some() {
         return explicit;
     }
@@ -356,7 +377,9 @@ fn qualify_script_command(
     match package_manager.unwrap_or("npm") {
         "pnpm" => Some(format!("pnpm {script_name}")),
         "yarn" => Some(format!("yarn {script_name}")),
-        _ => Some(format!("npm run {script_name}")).filter(|_| script_name != "test").or_else(|| Some("npm test".into())),
+        _ => Some(format!("npm run {script_name}"))
+            .filter(|_| script_name != "test")
+            .or_else(|| Some("npm test".into())),
     }
 }
 
@@ -464,6 +487,9 @@ dev = "cargo run"
         assert_eq!(profile.framework.as_deref(), Some("axum"));
         assert_eq!(profile.prefer_agent.as_deref(), Some("claude"));
         assert_eq!(profile.test_command.as_deref(), Some("cargo nextest run"));
-        assert_eq!(profile.scripts.get("dev").map(String::as_str), Some("cargo run"));
+        assert_eq!(
+            profile.scripts.get("dev").map(String::as_str),
+            Some("cargo run")
+        );
     }
 }
