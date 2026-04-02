@@ -97,15 +97,32 @@ fn run_log(script: &str) -> Result<RunResult> {
         .unwrap_or_default()
         .as_secs();
     let log_path = format!("qr-log-{timestamp}.log");
-    let mut file = File::create(&log_path)?;
-    let output = shell_command(script)
-        .output()
+    let file = File::create(&log_path)?;
+
+    // Use shell-level tee so output streams live to terminal AND to the log file
+    let tee_script = format!(
+        "{{ {} ; }} 2>&1 | tee -a {}",
+        script,
+        shell_escape(&log_path)
+    );
+    let mut child = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(&tee_script)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
         .with_context(|| format!("Failed to execute script '{script}'"))?;
-    file.write_all(&output.stdout)?;
-    file.write_all(&output.stderr)?;
+
+    let status = child.wait()?;
+    drop(file);
     writeln!(io::stdout(), "log written to {log_path}")?;
 
-    Ok(result_from_status(output.status, Some(log_path)))
+    Ok(result_from_status(status, Some(log_path)))
+}
+
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\'"))
 }
 
 fn shell_command(script: &str) -> Command {
