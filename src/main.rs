@@ -177,12 +177,72 @@ fn run() -> Result<ExitCode> {
 
 fn execute_init(config: &AppConfig, args: InitArgs) -> Result<()> {
     let config_path = config_file_path();
-    let created = write_default_config_if_missing(&config_path)?;
-    if created {
+    let is_new = !config_path.exists();
+
+    if is_new {
+        // Ask for project roots interactively
+        println!("Welcome to QuickRunner! Let's set up your project roots.");
+        println!("Enter directories to scan for projects (one per line, empty line to finish):");
+        println!("  Example: ~/Development");
+        println!("  Example: /Volumes/Delos/Development");
+        println!();
+
+        let mut roots: Vec<String> = Vec::new();
+        loop {
+            print!("  root {}: ", roots.len() + 1);
+            io::stdout().flush()?;
+            let mut line = String::new();
+            io::stdin().read_line(&mut line)?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                if roots.is_empty() {
+                    println!("  (defaulting to ~/Development)");
+                    roots.push("~/Development".into());
+                }
+                break;
+            }
+            roots.push(trimmed.to_string());
+        }
+
+        // Build config with user-provided roots
+        let roots_toml: Vec<String> = roots.iter().map(|r| format!("\"{r}\"")).collect();
+        let config_content = format!(
+            r#"[general]
+default_run_mode = "output"
+
+[projects]
+roots = [{roots}]
+scan_depth = 2
+scan_interval_hours = 1
+
+[ai]
+protocol = "openai"
+base_url = "https://api.fireworks.ai/inference/v1"
+model = "accounts/fireworks/models/llama-v3p1-70b-instruct"
+api_key_env = "QR_API_KEY"
+
+[stats]
+enabled = true
+db_path = "~/.config/qr/stats.db"
+"#,
+            roots = roots_toml.join(", ")
+        );
+
+        if let Some(parent) = config_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&config_path, &config_content)?;
         println!("created {}", config_path.display());
     } else {
         println!("config already present at {}", config_path.display());
     }
+
+    // Reload config in case we just wrote a new one with custom roots
+    let effective_config = if is_new {
+        AppConfig::load()?
+    } else {
+        config.clone()
+    };
 
     if !args.no_shell_wrapper {
         commands::alias::install_wrapper()?;
@@ -192,7 +252,7 @@ fn execute_init(config: &AppConfig, args: InitArgs) -> Result<()> {
         install_cron()?;
     }
 
-    let cache = scanner::scan_projects(config)?;
+    let cache = scanner::scan_projects(&effective_config)?;
     println!("initial scan found {} projects", cache.projects.len());
     Ok(())
 }
