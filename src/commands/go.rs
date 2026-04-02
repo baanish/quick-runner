@@ -52,7 +52,7 @@ pub fn rank_matches(entries: &[ProjectEntry], query: &str) -> Vec<ProjectEntry> 
 
     let mut exact = entries
         .iter()
-        .filter(|entry| entry.name.to_ascii_lowercase() == lower_query)
+        .filter(|entry| entry.name.eq_ignore_ascii_case(&lower_query))
         .cloned()
         .collect::<Vec<_>>();
     if !exact.is_empty() {
@@ -63,21 +63,23 @@ pub fn rank_matches(entries: &[ProjectEntry], query: &str) -> Vec<ProjectEntry> 
     let mut scored = entries
         .iter()
         .filter_map(|entry| {
-            let name = entry.name.to_ascii_lowercase();
-            let path = entry.path.to_ascii_lowercase();
-            let score = if name.contains(&lower_query) {
-                Some((10_000 - name.len() as i64) + lower_query.len() as i64)
-            } else if path.contains(&lower_query) {
-                Some(5_000 - path.len() as i64)
+            let score = if entry.name.to_ascii_lowercase().contains(&lower_query) {
+                Some((10_000 - entry.name.len() as i64) + lower_query.len() as i64)
+            } else if entry.path.to_ascii_lowercase().contains(&lower_query) {
+                Some(5_000 - entry.path.len() as i64)
             } else {
                 matcher.fuzzy_match(&entry.name, query)
             }?;
-            Some((score, entry.clone()))
+            Some((score, entry))
         })
         .collect::<Vec<_>>();
 
     scored.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.name.cmp(&right.1.name)));
-    scored.into_iter().map(|(_, entry)| entry).take(9).collect()
+    scored
+        .into_iter()
+        .take(9)
+        .map(|(_, entry)| entry.clone())
+        .collect()
 }
 
 #[cfg(test)]

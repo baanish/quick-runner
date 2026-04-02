@@ -76,20 +76,27 @@ pub fn scan_projects(config: &AppConfig) -> Result<ProjectCache> {
         projects,
     };
 
-    fs::write(config.cache_path(), serde_json::to_vec_pretty(&cache)?)?;
+    write_project_cache(&config.cache_path(), &cache)?;
     Ok(cache)
 }
 
 pub fn load_or_scan_projects(config: &AppConfig) -> Result<ProjectCache> {
     let path = config.cache_path();
     if path.exists() {
-        let raw = fs::read(&path)
-            .with_context(|| format!("Failed to read project cache {}", path.display()))?;
-        let cache: ProjectCache =
-            serde_json::from_slice(&raw).context("Failed to parse project cache")?;
-        return Ok(cache);
+        return read_project_cache(&path);
     }
     scan_projects(config)
+}
+
+pub fn write_project_cache(path: &Path, cache: &ProjectCache) -> Result<()> {
+    fs::write(path, serde_json::to_vec(cache)?)
+        .with_context(|| format!("Failed to write project cache {}", path.display()))
+}
+
+pub fn read_project_cache(path: &Path) -> Result<ProjectCache> {
+    let raw = fs::read(path)
+        .with_context(|| format!("Failed to read project cache {}", path.display()))?;
+    serde_json::from_slice(&raw).context("Failed to parse project cache")
 }
 
 fn detect_project(path: &Path) -> Result<Option<ProjectEntry>> {
@@ -267,5 +274,24 @@ mod tests {
         unsafe {
             std::env::remove_var("XDG_CONFIG_HOME");
         }
+    }
+
+    #[test]
+    fn cache_round_trip_reads_and_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("projects-cache.json");
+        let cache = ProjectCache {
+            scanned_at_unix_ms: 42,
+            projects: vec![ProjectEntry {
+                name: "demo".into(),
+                path: "/tmp/demo".into(),
+                source: "git".into(),
+            }],
+        };
+
+        write_project_cache(&path, &cache).unwrap();
+        let restored = read_project_cache(&path).unwrap();
+        assert_eq!(restored.scanned_at_unix_ms, 42);
+        assert_eq!(restored.projects, cache.projects);
     }
 }

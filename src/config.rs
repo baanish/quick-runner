@@ -59,16 +59,18 @@ impl AppConfig {
         Self::load_from_env_with_path(config_file_path())
     }
 
-    pub fn load_from_env_with_path(path: PathBuf) -> Result<Self> {
-        let mut config: AppConfig = toml::from_str(DEFAULT_CONFIG)?;
+    pub fn load_from_str(raw: &str) -> Result<Self> {
+        toml::from_str(raw).context("Failed to parse config.toml")
+    }
 
-        if path.exists() {
+    pub fn load_from_env_with_path(path: PathBuf) -> Result<Self> {
+        let mut config = if path.exists() {
             let raw = fs::read_to_string(&path)
                 .with_context(|| format!("Failed to read config file {}", path.display()))?;
-            let file_config: AppConfig =
-                toml::from_str(&raw).context("Failed to parse config.toml")?;
-            config = file_config;
-        }
+            Self::load_from_str(&raw)?
+        } else {
+            Self::load_from_str(DEFAULT_CONFIG)?
+        };
 
         apply_env_overrides(&mut config)?;
         Ok(config)
@@ -146,6 +148,10 @@ pub fn write_default_config_if_missing(path: &Path) -> Result<bool> {
     }
     fs::write(path, DEFAULT_CONFIG)?;
     Ok(true)
+}
+
+pub fn default_config_str() -> &'static str {
+    DEFAULT_CONFIG
 }
 
 fn apply_env_overrides(config: &mut AppConfig) -> Result<()> {
@@ -256,6 +262,13 @@ mod tests {
                 env::remove_var(key);
             }
         }
+    }
+
+    #[test]
+    fn load_from_str_parses_default_config() {
+        let config = AppConfig::load_from_str(default_config_str()).unwrap();
+        assert!(!config.projects.roots.is_empty());
+        assert!(config.projects.scan_depth > 0);
     }
 
     #[test]

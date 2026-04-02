@@ -7,18 +7,13 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
-
-mod ai;
-mod commands;
-mod config;
-mod picker;
-mod scanner;
-mod shell;
-mod stats_db;
-
-use commands::{alias::AliasCommand, go::GoResult};
-use config::{AppConfig, config_file_path, write_default_config_if_missing};
-use stats_db::{CommandStats, StatsDb};
+use quick_runner::{
+    ai, commands,
+    commands::{alias::AliasCommand, go::GoResult},
+    config::{AppConfig, config_file_path, write_default_config_if_missing},
+    scanner, shell,
+    stats_db::{CommandStats, StatsDb},
+};
 
 #[derive(Parser)]
 #[command(name = "qr", version, about = "QuickRunner")]
