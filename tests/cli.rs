@@ -1,5 +1,12 @@
 use assert_cmd::Command;
 use predicates::str::contains;
+use serde_json::Value;
+use std::{
+    fs,
+    io::{Read, Write},
+    net::TcpListener,
+    thread,
+};
 
 #[test]
 fn help_lists_core_commands() {
@@ -13,4 +20,145 @@ fn help_lists_core_commands() {
         .stdout(contains("stats"))
         .stdout(contains("scan"))
         .stdout(contains("init"));
+}
+
+#[test]
+fn learn_generates_profile_json_for_current_project() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(
+        tmp.path().join("package.json"),
+        r#"{
+  "name": "demo-app",
+  "packageManager": "pnpm@9.0.0",
+  "scripts": {
+    "build": "next build",
+    "test": "vitest run",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "next": "15.0.0",
+    "react": "19.0.0"
+  }
+}"#,
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("qr").unwrap();
+    cmd.current_dir(tmp.path())
+        .arg("learn")
+        .assert()
+        .success()
+        .stdout(contains("demo-app"))
+        .stdout(contains("pnpm"))
+        .stdout(contains("next"));
+
+    let raw = fs::read_to_string(tmp.path().join(".qr/profile.json")).unwrap();
+    let profile: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(profile["name"], "demo-app");
+    assert_eq!(profile["package_manager"], "pnpm");
+    assert_eq!(profile["framework"], "nextjs");
+    assert_eq!(profile["test_command"], "pnpm test");
+}
+
+#[test]
+fn learn_short_alias_works() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(
+        tmp.path().join("Cargo.toml"),
+        r#"[package]
+name = "demo-rs"
+version = "0.1.0"
+edition = "2024"
+"#,
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("qr").unwrap();
+    cmd.current_dir(tmp.path())
+        .arg("l")
+        .assert()
+        .success()
+        .stdout(contains("demo-rs"))
+        .stdout(contains("rust"));
+}
+
+#[test]
+fn do_routes_inline_tasks_with_preview() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_dir = tmp.path().join("cfg");
+    fs::create_dir_all(&cfg_dir).unwrap();
+    fs::create_dir_all(tmp.path().join(".qr")).unwrap();
+    let server = spawn_server(
+        200,
+        r#"{"choices":[{"message":{"content":"{\"classification\":\"inline\",\"command\":\"cargo test\"}"}}],"usage":{"prompt_tokens":8,"completion_tokens":6}}"#,
+    );
+
+    fs::write(
+        cfg_dir.join("config.toml"),
+        format!(
+            r#"[general]
+default_run_mode = "output"
+
+[projects]
+roots = ["~/Development"]
+scan_depth = 2
+scan_interval_hours = 1
+
+[ai]
+protocol = "openai"
+base_url = "{server}"
+model = "demo"
+api_key_env = "QR_TEST_AI_KEY"
+
+[stats]
+enabled = false
+db_path = "__default__"
+"#
+        ),
+    )
+    .unwrap();
+    fs::write(
+        tmp.path().join(".qr/profile.json"),
+        r#"{"name":"demo-rs","language":"rust","framework":null,"package_manager":"cargo","test_command":"cargo test","build_command":"cargo build","lint_command":"cargo clippy","scripts":{"test":"cargo test"},"prefer_agent":null,"entry_points":["src/main.rs"]}"#,
+    )
+    .unwrap();
+
+    unsafe {
+        std::env::set_var("QR_CONFIG_DIR", &cfg_dir);
+        std::env::set_var("QR_TEST_AI_KEY", "token");
+    }
+
+    let mut cmd = Command::cargo_bin("qr").unwrap();
+    cmd.current_dir(tmp.path())
+        .arg("do")
+        .arg("run tests")
+        .write_stdin("n\n")
+        .assert()
+        .success()
+        .stdout(contains("cargo test"))
+        .stdout(contains("Run?"));
+
+    unsafe {
+        std::env::remove_var("QR_CONFIG_DIR");
+        std::env::remove_var("QR_TEST_AI_KEY");
+    }
+}
+
+fn spawn_server(status: u16, body: &'static str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer);
+            let response = format!(
+                "HTTP/1.1 {status} OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+    });
+
+    format!("http://{addr}/v1")
 }

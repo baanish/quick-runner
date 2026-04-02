@@ -10,7 +10,7 @@ use clap::{Args, Parser, Subcommand};
 use quick_runner::{
     ai, commands,
     commands::{alias::AliasCommand, go::GoResult},
-    config::{AppConfig, config_file_path, write_default_config_if_missing},
+    config::{AppConfig, config_file_path},
     scanner, shell,
     stats_db::{CommandStats, StatsDb},
 };
@@ -36,7 +36,9 @@ enum Commands {
     Scan,
     #[command(alias = "i")]
     Init(InitArgs),
-    #[command(alias = "d", hide = true)]
+    #[command(alias = "l")]
+    Learn,
+    #[command(alias = "d")]
     Do {
         #[arg(required = true)]
         task: Vec<String>,
@@ -160,17 +162,34 @@ fn run() -> Result<ExitCode> {
             stats.command_type = "__skip_stats__".into();
             Ok(ExitCode::SUCCESS)
         }
+        Commands::Learn => {
+            let result = commands::learn::execute()?;
+            commands::learn::print_summary(&result);
+            Ok(ExitCode::SUCCESS)
+        }
         Commands::Do { task } => {
             let client = ai::client::AiClient::new(
                 config.ai_primary_provider(),
                 config.ai_fallback_provider(),
             );
             let prompt = task.join(" ");
-            let _ = prompt;
-            let _ = client.primary_provider_label();
-            Err(anyhow!(
-                "`qr do` is reserved for v2; architecture is present in v1"
-            ))
+            let result = commands::do_cmd::execute(&config, &client, &prompt)?;
+            stats.ai_used = true;
+            stats.input_tokens = result.ai_response.input_tokens;
+            stats.output_tokens = result.ai_response.output_tokens;
+            stats.provider = result.ai_response.provider_label.clone();
+            stats.estimated_cost_usd = result.ai_response.estimated_cost_usd;
+
+            match result.outcome {
+                commands::do_cmd::DoOutcome::Inline { exit_code, .. } => {
+                    if exit_code == 0 {
+                        Ok(ExitCode::SUCCESS)
+                    } else {
+                        Ok(ExitCode::from(exit_code as u8))
+                    }
+                }
+                commands::do_cmd::DoOutcome::Delegate { .. } => Ok(ExitCode::SUCCESS),
+            }
         }
     };
 
@@ -347,6 +366,7 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Stats => "stats",
         Commands::Scan => "scan",
         Commands::Init(_) => "init",
+        Commands::Learn => "learn",
         Commands::Do { .. } => "do",
     }
 }

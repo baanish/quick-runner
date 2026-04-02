@@ -21,3 +21,27 @@ api_key_env = "QR_FALLBACK_API_KEY"
 [stats]
 enabled = false
 db_path = "__default__"
+
+[do]
+auto_approve = [
+  "cargo",
+  "npm",
+  "pnpm",
+  "yarn",
+  "pip",
+  "pytest",
+  "make",
+  "git",
+  "ls",
+  "cat",
+  "grep",
+  "find",
+  "echo",
+  "mkdir",
+  "touch",
+  "rm",
+]
+
+[do.agents]
+codex = "codex exec"
+claude = "claude --dangerously-skip-permissions -p"

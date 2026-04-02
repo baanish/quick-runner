@@ -16,6 +16,8 @@ pub struct AppConfig {
     pub projects: ProjectsConfig,
     pub ai: AiConfig,
     pub stats: StatsConfig,
+    #[serde(default)]
+    pub do_config: DoConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +54,22 @@ pub struct FallbackAiConfig {
 pub struct StatsConfig {
     pub enabled: bool,
     pub db_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DoConfig {
+    #[serde(default = "default_auto_approve")]
+    pub auto_approve: Vec<String>,
+    #[serde(default)]
+    pub agents: AgentConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentConfig {
+    #[serde(default = "default_codex_agent")]
+    pub codex: String,
+    #[serde(default = "default_claude_agent")]
+    pub claude: String,
 }
 
 impl AppConfig {
@@ -159,6 +177,42 @@ pub fn write_default_config_if_missing(path: &Path) -> Result<bool> {
 
 pub fn default_config_str() -> &'static str {
     DEFAULT_CONFIG
+}
+
+fn default_auto_approve() -> Vec<String> {
+    [
+        "cargo", "npm", "pnpm", "yarn", "pip", "pytest", "make", "git", "ls", "cat", "grep",
+        "find", "echo", "mkdir", "touch", "rm",
+    ]
+    .into_iter()
+    .map(ToOwned::to_owned)
+    .collect()
+}
+
+fn default_codex_agent() -> String {
+    "codex exec".into()
+}
+
+fn default_claude_agent() -> String {
+    "claude --dangerously-skip-permissions -p".into()
+}
+
+impl Default for DoConfig {
+    fn default() -> Self {
+        Self {
+            auto_approve: default_auto_approve(),
+            agents: AgentConfig::default(),
+        }
+    }
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            codex: default_codex_agent(),
+            claude: default_claude_agent(),
+        }
+    }
 }
 
 fn apply_env_overrides(config: &mut AppConfig) -> Result<()> {
