@@ -20,4 +20,4 @@ api_key_env = "QR_FALLBACK_API_KEY"
 
 [stats]
 enabled = true
-db_path = "~/.config/qr/stats.db"
+db_path = "__default__"

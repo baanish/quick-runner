@@ -86,7 +86,11 @@ impl AppConfig {
     }
 
     pub fn stats_db_path(&self) -> PathBuf {
-        expand_path(&self.stats.db_path)
+        if self.stats.db_path.is_empty() || self.stats.db_path == "__default__" {
+            config_dir().join("stats.db")
+        } else {
+            expand_path(&self.stats.db_path)
+        }
     }
 
     pub fn cache_path(&self) -> PathBuf {

@@ -223,7 +223,7 @@ api_key_env = "QR_API_KEY"
 
 [stats]
 enabled = true
-db_path = "~/.config/qr/stats.db"
+db_path = "__default__"
 "#,
             roots = roots_toml.join(", ")
         );
