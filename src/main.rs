@@ -105,6 +105,7 @@ fn run() -> Result<ExitCode> {
         provider: "no AI".into(),
         ..CommandStats::default()
     };
+    let mut interactive_ms: u128 = 0;
 
     let execution = match cli.command {
         Commands::Go(args) => {
@@ -113,6 +114,7 @@ fn run() -> Result<ExitCode> {
                 anyhow::bail!("project name required");
             }
             let result = commands::go::execute(&config, &query)?;
+            interactive_ms = result.interactive_ms;
             print_go_result(&result, args.print_path)?;
             Ok(ExitCode::SUCCESS)
         }
@@ -172,7 +174,7 @@ fn run() -> Result<ExitCode> {
         }
     };
 
-    stats.latency_ms = start.elapsed().as_millis();
+    stats.latency_ms = start.elapsed().as_millis().saturating_sub(interactive_ms);
     if stats.command_type != "__skip_stats__" {
         if config.stats.enabled {
             let db = StatsDb::open(&config.stats_db_path())?;

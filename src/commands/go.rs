@@ -7,6 +7,8 @@ use crate::{config::AppConfig, picker, scanner::ProjectEntry, scanner::load_or_s
 
 pub struct GoResult {
     pub path: String,
+    /// Time spent waiting for interactive picker input (should be excluded from perf stats)
+    pub interactive_ms: u128,
 }
 
 pub fn execute(config: &AppConfig, query: &str) -> Result<GoResult> {
@@ -19,6 +21,7 @@ pub fn execute(config: &AppConfig, query: &str) -> Result<GoResult> {
         ));
     }
 
+    let mut interactive_ms: u128 = 0;
     let selected = if matches.len() == 1 {
         matches[0].clone()
     } else if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
@@ -26,9 +29,11 @@ pub fn execute(config: &AppConfig, query: &str) -> Result<GoResult> {
             .iter()
             .map(|entry| format!("{} ({})", entry.name, entry.path))
             .collect::<Vec<_>>();
+        let picker_start = std::time::Instant::now();
         let Some(index) = picker::pick_index(&labels)? else {
             return Err(anyhow!("Selection cancelled"));
         };
+        interactive_ms = picker_start.elapsed().as_millis();
         matches[index].clone()
     } else {
         return Err(anyhow!(
@@ -43,6 +48,7 @@ pub fn execute(config: &AppConfig, query: &str) -> Result<GoResult> {
 
     Ok(GoResult {
         path: selected.path,
+        interactive_ms,
     })
 }
 
