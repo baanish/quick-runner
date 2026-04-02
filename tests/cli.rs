@@ -98,6 +98,32 @@ edition = "2024"
 }
 
 #[test]
+fn config_path_prints_config_file_path() {
+    let _guard = env_lock().lock().unwrap();
+    clear_test_env();
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_dir = tmp.path().join("cfg");
+    fs::create_dir_all(&cfg_dir).unwrap();
+
+    unsafe {
+        std::env::set_var("QR_CONFIG_DIR", &cfg_dir);
+    }
+
+    let expected = cfg_dir.join("config.toml");
+
+    let mut cmd = Command::cargo_bin("qr").unwrap();
+    cmd.arg("config")
+        .arg("path")
+        .assert()
+        .success()
+        .stdout(format!("{}\n", expected.display()));
+
+    unsafe {
+        std::env::remove_var("QR_CONFIG_DIR");
+    }
+}
+
+#[test]
 fn do_routes_inline_tasks_with_preview() {
     let _guard = env_lock().lock().unwrap();
     clear_test_env();
