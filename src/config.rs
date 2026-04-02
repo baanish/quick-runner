@@ -289,7 +289,7 @@ mod tests {
 
         assert_eq!(config.general.default_run_mode, "output");
         assert_eq!(config.projects.scan_depth, 2);
-        assert!(config.stats.enabled);
+        assert!(!config.stats.enabled);
     }
 
     #[test]

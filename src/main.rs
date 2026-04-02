@@ -180,7 +180,7 @@ fn run() -> Result<ExitCode> {
             let db = StatsDb::open(&config.stats_db_path())?;
             db.record(&stats)?;
         }
-        print_stats_line(&stats)?;
+        print_stats_line(&stats, config.stats.enabled)?;
     }
     execution
 }
@@ -316,7 +316,11 @@ fn print_go_result(result: &GoResult, print_path: bool) -> Result<()> {
     Ok(())
 }
 
-fn print_stats_line(stats: &CommandStats) -> Result<()> {
+fn print_stats_line(stats: &CommandStats, stats_enabled: bool) -> Result<()> {
+    // Always show stats for AI commands; otherwise only when stats are enabled
+    if !stats.ai_used && !stats_enabled {
+        return Ok(());
+    }
     let mut stderr = io::stderr().lock();
     if stats.ai_used {
         writeln!(
