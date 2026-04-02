@@ -233,7 +233,7 @@ mod tests {
         fs::write(root.join("proj/.git/config"), "").unwrap();
 
         unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", &cfg_dir);
+            std::env::set_var("QR_CONFIG_DIR", &cfg_dir);
         }
 
         let config = AppConfig::load_from_env_with_path(cfg_dir.join("config.toml")).unwrap();
@@ -246,7 +246,7 @@ mod tests {
         assert!(config.cache_path().exists());
 
         unsafe {
-            std::env::remove_var("XDG_CONFIG_HOME");
+            std::env::remove_var("QR_CONFIG_DIR");
         }
     }
 
@@ -260,7 +260,7 @@ mod tests {
         fs::write(root.join(".next/package.json"), "{}").unwrap();
 
         unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", &cfg_dir);
+            std::env::set_var("QR_CONFIG_DIR", &cfg_dir);
         }
 
         let config = AppConfig::load_from_env_with_path(cfg_dir.join("config.toml")).unwrap();
@@ -272,7 +272,7 @@ mod tests {
         assert!(cache.projects.is_empty());
 
         unsafe {
-            std::env::remove_var("XDG_CONFIG_HOME");
+            std::env::remove_var("QR_CONFIG_DIR");
         }
     }
 

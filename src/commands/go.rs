@@ -75,11 +75,63 @@ pub fn rank_matches(entries: &[ProjectEntry], query: &str) -> Vec<ProjectEntry> 
         .collect::<Vec<_>>();
 
     scored.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.name.cmp(&right.1.name)));
-    scored
+    let results: Vec<ProjectEntry> = scored
         .into_iter()
         .take(9)
         .map(|(_, entry)| entry.clone())
-        .collect()
+        .collect();
+
+    // If strict matching found nothing, try bigram similarity for typos/transpositions
+    if results.is_empty() && lower_query.len() >= 3 {
+        let query_bigrams = bigrams(&lower_query);
+        let mut fallback: Vec<(f64, &ProjectEntry)> = entries
+            .iter()
+            .filter_map(|entry| {
+                let name_lower = entry.name.to_ascii_lowercase();
+                let name_bigrams = bigrams(&name_lower);
+                let sim = bigram_similarity(&query_bigrams, &name_bigrams);
+                if sim >= 0.25 {
+                    Some((sim, entry))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        fallback.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        return fallback
+            .into_iter()
+            .take(9)
+            .map(|(_, entry)| entry.clone())
+            .collect();
+    }
+
+    results
+}
+
+fn bigrams(s: &str) -> Vec<(char, char)> {
+    let chars: Vec<char> = s.chars().collect();
+    chars.windows(2).map(|w| (w[0], w[1])).collect()
+}
+
+fn bigram_similarity(a: &[(char, char)], b: &[(char, char)]) -> f64 {
+    if a.is_empty() && b.is_empty() {
+        return 1.0;
+    }
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let mut b_remaining: Vec<bool> = vec![true; b.len()];
+    let mut matches = 0;
+    for pair in a {
+        for (i, other) in b.iter().enumerate() {
+            if b_remaining[i] && pair == other {
+                b_remaining[i] = false;
+                matches += 1;
+                break;
+            }
+        }
+    }
+    (2.0 * matches as f64) / (a.len() + b.len()) as f64
 }
 
 #[cfg(test)]

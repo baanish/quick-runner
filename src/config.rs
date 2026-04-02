@@ -121,6 +121,9 @@ impl AppConfig {
 }
 
 pub fn config_dir() -> PathBuf {
+    if let Ok(override_dir) = std::env::var("QR_CONFIG_DIR") {
+        return PathBuf::from(override_dir);
+    }
     if let Some(base) = dirs::config_dir() {
         return base.join("qr");
     }
