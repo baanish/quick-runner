@@ -75,22 +75,17 @@ impl AiClient {
         system_prompt: &str,
         user_message: &str,
     ) -> Result<AiResponse> {
-        let api_key = env::var(&provider.api_key_env)
-            .with_context(|| format!("Missing API key in {}", provider.api_key_env))?;
+        let api_key = resolve_api_key(provider)?;
         let url = endpoint_url(provider);
 
         let request = match provider.protocol {
-            AiProtocol::OpenAi => self
-                .http
-                .post(url)
-                .bearer_auth(api_key)
-                .json(&json!({
-                    "model": provider.model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_message}
-                    ]
-                })),
+            AiProtocol::OpenAi => self.http.post(url).bearer_auth(api_key).json(&json!({
+                "model": provider.model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message}
+                ]
+            })),
             AiProtocol::Anthropic => self
                 .http
                 .post(url)
@@ -124,6 +119,37 @@ impl AiClient {
         let json: Value = serde_json::from_str(&body).context("Failed to parse AI response")?;
         parse_response(provider, &json)
     }
+}
+
+fn resolve_api_key(provider: &ProviderConfig) -> Result<String> {
+    if !provider.api_key_env.trim().is_empty() {
+        if let Ok(value) = env::var(&provider.api_key_env) {
+            if !value.trim().is_empty() {
+                return Ok(value);
+            }
+        }
+    }
+
+    let well_known_env = provider.protocol.default_api_key_env();
+    if let Ok(value) = env::var(well_known_env) {
+        if !value.trim().is_empty() {
+            return Ok(value);
+        }
+    }
+
+    if !provider.api_key.trim().is_empty() {
+        return Ok(provider.api_key.clone());
+    }
+
+    Err(anyhow!(
+        "Missing API key. Checked {}, {}, then config.toml",
+        if provider.api_key_env.trim().is_empty() {
+            "<no custom env var configured>"
+        } else {
+            provider.api_key_env.as_str()
+        },
+        well_known_env
+    ))
 }
 
 fn endpoint_url(provider: &ProviderConfig) -> String {
@@ -210,7 +236,11 @@ fn extract_error_message(body: &str) -> String {
             json.pointer("/error/message")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned)
-                .or_else(|| json.get("error").and_then(Value::as_str).map(ToOwned::to_owned))
+                .or_else(|| {
+                    json.get("error")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
         })
         .unwrap_or_else(|| body.trim().to_string())
 }
@@ -227,14 +257,36 @@ mod tests {
     use std::{
         io::{Read, Write},
         net::TcpListener,
+        sync::{Mutex, OnceLock},
         thread,
     };
 
     use super::*;
     use crate::ai::providers::AiProtocol;
 
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn clear_test_env() {
+        for key in [
+            "QR_TEST_AI_KEY",
+            "CUSTOM_QR_TEST_AI_KEY",
+            "CUSTOM_QR_TEST_ANTHROPIC_KEY",
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+        ] {
+            unsafe {
+                std::env::remove_var(key);
+            }
+        }
+    }
+
     #[test]
     fn openai_client_parses_text_response() {
+        let _guard = env_lock().lock().unwrap();
+        clear_test_env();
         let server = spawn_server(
             200,
             r#"{"choices":[{"message":{"content":"cargo test"}}],"usage":{"prompt_tokens":12,"completion_tokens":4}}"#,
@@ -248,6 +300,7 @@ mod tests {
                 protocol: AiProtocol::OpenAi,
                 base_url: server,
                 model: "demo".into(),
+                api_key: String::new(),
                 api_key_env: "QR_TEST_AI_KEY".into(),
             },
             None,
@@ -267,6 +320,8 @@ mod tests {
 
     #[test]
     fn anthropic_client_parses_text_response() {
+        let _guard = env_lock().lock().unwrap();
+        clear_test_env();
         let server = spawn_server(
             200,
             r#"{"content":[{"type":"text","text":"delegate"}],"usage":{"input_tokens":7,"output_tokens":3}}"#,
@@ -280,6 +335,7 @@ mod tests {
                 protocol: AiProtocol::Anthropic,
                 base_url: server,
                 model: "claude-demo".into(),
+                api_key: String::new(),
                 api_key_env: "QR_TEST_AI_KEY".into(),
             },
             None,
@@ -299,6 +355,8 @@ mod tests {
 
     #[test]
     fn rate_limit_errors_are_reported_cleanly() {
+        let _guard = env_lock().lock().unwrap();
+        clear_test_env();
         let server = spawn_server(429, r#"{"error":{"message":"slow down"}}"#);
         unsafe {
             std::env::set_var("QR_TEST_AI_KEY", "token");
@@ -309,6 +367,7 @@ mod tests {
                 protocol: AiProtocol::OpenAi,
                 base_url: server,
                 model: "demo".into(),
+                api_key: String::new(),
                 api_key_env: "QR_TEST_AI_KEY".into(),
             },
             None,
@@ -322,6 +381,75 @@ mod tests {
         unsafe {
             std::env::remove_var("QR_TEST_AI_KEY");
         }
+    }
+
+    #[test]
+    fn custom_env_var_overrides_well_known_and_config_key() {
+        let _guard = env_lock().lock().unwrap();
+        clear_test_env();
+        unsafe {
+            std::env::set_var("CUSTOM_QR_TEST_AI_KEY", "custom-token");
+            std::env::set_var("OPENAI_API_KEY", "well-known-token");
+        }
+
+        let api_key = resolve_api_key(&ProviderConfig {
+            protocol: AiProtocol::OpenAi,
+            base_url: "https://example.test/v1".into(),
+            model: "demo".into(),
+            api_key: "config-token".into(),
+            api_key_env: "CUSTOM_QR_TEST_AI_KEY".into(),
+        })
+        .unwrap();
+        assert_eq!(api_key, "custom-token");
+
+        unsafe {
+            std::env::remove_var("CUSTOM_QR_TEST_AI_KEY");
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+    }
+
+    #[test]
+    fn well_known_env_var_is_used_when_custom_env_var_is_missing() {
+        let _guard = env_lock().lock().unwrap();
+        clear_test_env();
+        unsafe {
+            std::env::remove_var("CUSTOM_QR_TEST_ANTHROPIC_KEY");
+            std::env::set_var("ANTHROPIC_API_KEY", "well-known-token");
+        }
+
+        let api_key = resolve_api_key(&ProviderConfig {
+            protocol: AiProtocol::Anthropic,
+            base_url: "https://example.test".into(),
+            model: "claude-demo".into(),
+            api_key: "config-token".into(),
+            api_key_env: "CUSTOM_QR_TEST_ANTHROPIC_KEY".into(),
+        })
+        .unwrap();
+        assert_eq!(api_key, "well-known-token");
+
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+        }
+    }
+
+    #[test]
+    fn config_key_is_used_when_no_env_vars_are_available() {
+        let _guard = env_lock().lock().unwrap();
+        clear_test_env();
+        unsafe {
+            std::env::remove_var("CUSTOM_QR_TEST_AI_KEY");
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+
+        let api_key = resolve_api_key(&ProviderConfig {
+            protocol: AiProtocol::OpenAi,
+            base_url: "https://example.test/v1".into(),
+            model: "demo".into(),
+            api_key: "config-token".into(),
+            api_key_env: "CUSTOM_QR_TEST_AI_KEY".into(),
+        })
+        .unwrap();
+        assert_eq!(api_key, "config-token");
     }
 
     fn spawn_server(status: u16, body: &'static str) -> String {

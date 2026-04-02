@@ -28,10 +28,27 @@ impl std::str::FromStr for AiProtocol {
     }
 }
 
+impl AiProtocol {
+    pub fn default_base_url(self) -> &'static str {
+        match self {
+            Self::OpenAi => "https://api.openai.com/v1",
+            Self::Anthropic => "https://api.anthropic.com",
+        }
+    }
+
+    pub fn default_api_key_env(self) -> &'static str {
+        match self {
+            Self::OpenAi => "OPENAI_API_KEY",
+            Self::Anthropic => "ANTHROPIC_API_KEY",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     pub protocol: AiProtocol,
     pub base_url: String,
     pub model: String,
+    pub api_key: String,
     pub api_key_env: String,
 }

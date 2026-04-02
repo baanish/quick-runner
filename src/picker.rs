@@ -76,7 +76,10 @@ fn render_page(
         write!(stdout, "{marker} {}) {}\r\n", display_index + 1, value)?;
     }
     if end < options.len() || page > 0 {
-        write!(stdout, "Use arrows to change page. Press 1-9, ESC, or q.\r\n")?;
+        write!(
+            stdout,
+            "Use arrows to change page. Press 1-9, ESC, or q.\r\n"
+        )?;
     } else {
         write!(stdout, "Press 1-9, ESC, or q.\r\n")?;
     }

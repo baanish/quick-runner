@@ -16,7 +16,7 @@ pub struct AppConfig {
     pub projects: ProjectsConfig,
     pub ai: AiConfig,
     pub stats: StatsConfig,
-    #[serde(default)]
+    #[serde(rename = "do", default)]
     pub do_config: DoConfig,
 }
 
@@ -37,6 +37,8 @@ pub struct AiConfig {
     pub protocol: AiProtocol,
     pub base_url: String,
     pub model: String,
+    #[serde(default)]
+    pub api_key: String,
     pub api_key_env: String,
     #[serde(default)]
     pub fallback: Option<FallbackAiConfig>,
@@ -47,6 +49,8 @@ pub struct FallbackAiConfig {
     pub protocol: AiProtocol,
     pub base_url: String,
     pub model: String,
+    #[serde(default)]
+    pub api_key: String,
     pub api_key_env: String,
 }
 
@@ -128,6 +132,7 @@ impl AppConfig {
             protocol: self.ai.protocol,
             base_url: self.ai.base_url.clone(),
             model: self.ai.model.clone(),
+            api_key: self.ai.api_key.clone(),
             api_key_env: self.ai.api_key_env.clone(),
         }
     }
@@ -137,6 +142,7 @@ impl AppConfig {
             protocol: fallback.protocol,
             base_url: fallback.base_url.clone(),
             model: fallback.model.clone(),
+            api_key: fallback.api_key.clone(),
             api_key_env: fallback.api_key_env.clone(),
         })
     }
@@ -241,6 +247,9 @@ fn apply_env_overrides(config: &mut AppConfig) -> Result<()> {
     if let Ok(value) = env::var("QR_AI_MODEL") {
         config.ai.model = value;
     }
+    if let Ok(value) = env::var("QR_AI_API_KEY") {
+        config.ai.api_key = value;
+    }
     if let Ok(value) = env::var("QR_AI_API_KEY_ENV") {
         config.ai.api_key_env = value;
     }
@@ -252,6 +261,9 @@ fn apply_env_overrides(config: &mut AppConfig) -> Result<()> {
     }
     if let Ok(value) = env::var("QR_AI_FALLBACK_MODEL") {
         fallback_config_mut(&mut config.ai).model = value;
+    }
+    if let Ok(value) = env::var("QR_AI_FALLBACK_API_KEY") {
+        fallback_config_mut(&mut config.ai).api_key = value;
     }
     if let Ok(value) = env::var("QR_AI_FALLBACK_API_KEY_ENV") {
         fallback_config_mut(&mut config.ai).api_key_env = value;
@@ -270,6 +282,7 @@ fn fallback_config_mut(ai: &mut AiConfig) -> &mut FallbackAiConfig {
         protocol: ai.protocol,
         base_url: ai.base_url.clone(),
         model: ai.model.clone(),
+        api_key: ai.api_key.clone(),
         api_key_env: ai.api_key_env.clone(),
     })
 }
@@ -311,10 +324,12 @@ mod tests {
             "QR_AI_PROTOCOL",
             "QR_AI_BASE_URL",
             "QR_AI_MODEL",
+            "QR_AI_API_KEY",
             "QR_AI_API_KEY_ENV",
             "QR_AI_FALLBACK_PROTOCOL",
             "QR_AI_FALLBACK_BASE_URL",
             "QR_AI_FALLBACK_MODEL",
+            "QR_AI_FALLBACK_API_KEY",
             "QR_AI_FALLBACK_API_KEY_ENV",
             "QR_STATS_ENABLED",
             "QR_STATS_DB_PATH",
@@ -365,11 +380,13 @@ scan_interval_hours = 4
 protocol = "openai"
 base_url = "https://primary"
 model = "primary-model"
+api_key = "primary-config-key"
 api_key_env = "PRIMARY_KEY"
 [ai.fallback]
 protocol = "anthropic"
 base_url = "https://fallback"
 model = "fallback-model"
+api_key = "fallback-config-key"
 api_key_env = "FALLBACK_KEY"
 [stats]
 enabled = true
@@ -386,10 +403,12 @@ db_path = "/tmp/file.db"
             env::set_var("QR_AI_PROTOCOL", "anthropic");
             env::set_var("QR_AI_BASE_URL", "https://override-primary");
             env::set_var("QR_AI_MODEL", "override-primary-model");
+            env::set_var("QR_AI_API_KEY", "override-primary-config-key");
             env::set_var("QR_AI_API_KEY_ENV", "OVERRIDE_PRIMARY_KEY");
             env::set_var("QR_AI_FALLBACK_PROTOCOL", "openai");
             env::set_var("QR_AI_FALLBACK_BASE_URL", "https://override-fallback");
             env::set_var("QR_AI_FALLBACK_MODEL", "override-fallback-model");
+            env::set_var("QR_AI_FALLBACK_API_KEY", "override-fallback-config-key");
             env::set_var("QR_AI_FALLBACK_API_KEY_ENV", "OVERRIDE_FALLBACK_KEY");
             env::set_var("QR_STATS_ENABLED", "false");
             env::set_var("QR_STATS_DB_PATH", "/tmp/override.db");
@@ -404,11 +423,13 @@ db_path = "/tmp/file.db"
         assert_eq!(config.ai.protocol, AiProtocol::Anthropic);
         assert_eq!(config.ai.base_url, "https://override-primary");
         assert_eq!(config.ai.model, "override-primary-model");
+        assert_eq!(config.ai.api_key, "override-primary-config-key");
         assert_eq!(config.ai.api_key_env, "OVERRIDE_PRIMARY_KEY");
         let fallback = config.ai.fallback.as_ref().unwrap();
         assert_eq!(fallback.protocol, AiProtocol::OpenAi);
         assert_eq!(fallback.base_url, "https://override-fallback");
         assert_eq!(fallback.model, "override-fallback-model");
+        assert_eq!(fallback.api_key, "override-fallback-config-key");
         assert_eq!(fallback.api_key_env, "OVERRIDE_FALLBACK_KEY");
         assert!(!config.stats.enabled);
         assert_eq!(config.stats.db_path, "/tmp/override.db");
@@ -435,6 +456,7 @@ scan_interval_hours = 4
 protocol = "openai"
 base_url = "https://primary"
 model = "primary-model"
+api_key = "primary-config-key"
 api_key_env = "PRIMARY_KEY"
 [stats]
 enabled = true
@@ -448,6 +470,7 @@ db_path = "/tmp/file.db"
         assert_eq!(config.ai.protocol, AiProtocol::OpenAi);
         assert_eq!(config.ai.base_url, "https://primary");
         assert_eq!(config.ai.model, "primary-model");
+        assert_eq!(config.ai.api_key, "primary-config-key");
         assert_eq!(config.ai.api_key_env, "PRIMARY_KEY");
         assert!(config.ai.fallback.is_none());
         clear_test_env();
