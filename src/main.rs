@@ -11,7 +11,7 @@ use quick_runner::{
     ai,
     ai::providers::AiProtocol,
     commands,
-    commands::{alias::AliasCommand, go::GoResult},
+    commands::{alias::AliasCommand, config_cmd::ConfigArgs, go::GoResult},
     config::{
         AgentConfig, AiConfig, AppConfig, DoConfig, FallbackAiConfig, GeneralConfig,
         ProjectsConfig, StatsConfig, config_file_path,
@@ -33,6 +33,8 @@ struct Cli {
 enum Commands {
     #[command(alias = "g")]
     Go(GoArgs),
+    #[command(alias = "c")]
+    Config(ConfigArgs),
     #[command(alias = "r")]
     Run(RunArgs),
     #[command(alias = "a")]
@@ -125,6 +127,10 @@ fn run() -> Result<ExitCode> {
             let result = commands::go::execute(&config, &query)?;
             interactive_ms = result.interactive_ms;
             print_go_result(&result, args.print_path)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Config(args) => {
+            commands::config_cmd::execute(args)?;
             Ok(ExitCode::SUCCESS)
         }
         Commands::Run(args) => {
@@ -489,6 +495,7 @@ fn print_stats_line(stats: &CommandStats, stats_enabled: bool) -> Result<()> {
 fn command_name(command: &Commands) -> &'static str {
     match command {
         Commands::Go(_) => "go",
+        Commands::Config(_) => "config",
         Commands::Run(_) => "run",
         Commands::Alias(_) => "alias",
         Commands::Stats => "stats",
