@@ -65,7 +65,7 @@ fn render_page(
         terminal::Clear(ClearType::All),
         cursor::MoveTo(0, 0)
     )?;
-    writeln!(stdout, "Multiple matches found:")?;
+    write!(stdout, "Multiple matches found:\r\n")?;
     for (display_index, value) in options[start..end].iter().enumerate() {
         let absolute = start + display_index;
         let marker = if selected_absolute == Some(absolute) {
@@ -73,12 +73,12 @@ fn render_page(
         } else {
             " "
         };
-        writeln!(stdout, "{marker} {}) {}", display_index + 1, value)?;
+        write!(stdout, "{marker} {}) {}\r\n", display_index + 1, value)?;
     }
     if end < options.len() || page > 0 {
-        writeln!(stdout, "Use arrows to change page. Press 1-9, ESC, or q.")?;
+        write!(stdout, "Use arrows to change page. Press 1-9, ESC, or q.\r\n")?;
     } else {
-        writeln!(stdout, "Press 1-9, ESC, or q.")?;
+        write!(stdout, "Press 1-9, ESC, or q.\r\n")?;
     }
     stdout.flush()?;
     Ok(())
