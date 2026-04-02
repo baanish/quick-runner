@@ -83,8 +83,13 @@ pub fn scan_projects(config: &AppConfig) -> Result<ProjectCache> {
 pub fn load_or_scan_projects(config: &AppConfig) -> Result<ProjectCache> {
     let path = config.cache_path();
     if path.exists() {
-        return read_project_cache(&path);
+        let cache = read_project_cache(&path)?;
+        if !cache.projects.is_empty() {
+            return Ok(cache);
+        }
+        // Cache exists but is empty — rescan
     }
+    eprintln!("No project cache found, scanning...");
     scan_projects(config)
 }
 
