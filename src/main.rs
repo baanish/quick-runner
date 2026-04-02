@@ -231,7 +231,7 @@ model = "accounts/fireworks/models/llama-v3p1-70b-instruct"
 api_key_env = "QR_API_KEY"
 
 [stats]
-enabled = true
+enabled = false
 db_path = "__default__"
 "#,
             roots = roots_toml.join(", ")

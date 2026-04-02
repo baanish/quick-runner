@@ -19,5 +19,5 @@ model = "llama3.1-70b"
 api_key_env = "QR_FALLBACK_API_KEY"
 
 [stats]
-enabled = true
+enabled = false
 db_path = "__default__"
