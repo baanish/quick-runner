@@ -95,7 +95,7 @@ pub fn shell_wrapper_snippet(shell: ShellKind, binary_name: &str) -> String {
     match shell {
         ShellKind::Fish => format!(
             r#"function {binary_name}
-    if test (count $argv) -gt 0; and test $argv[1] = go
+    if test (count $argv) -gt 0; and test $argv[1] = go -o $argv[1] = g
         set -l target (command {binary_name} go $argv[2..-1] --print-path)
         if test -n "$target"
             cd $target
@@ -107,7 +107,7 @@ end"#
         ),
         ShellKind::Zsh | ShellKind::Bash => format!(
             r#"{binary_name}() {{
-  if [ "$1" = "go" ]; then
+  if [ "$1" = "go" ] || [ "$1" = "g" ]; then
     local dir
     dir=$(command {binary_name} go "${{@:2}}" --print-path)
     if [ -n "$dir" ]; then

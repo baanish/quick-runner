@@ -45,7 +45,8 @@ enum Commands {
 
 #[derive(Args)]
 struct GoArgs {
-    project: String,
+    /// Project name (multiple words are joined with hyphens)
+    project: Vec<String>,
     #[arg(long, hide = true)]
     print_path: bool,
 }
@@ -107,7 +108,11 @@ fn run() -> Result<ExitCode> {
 
     let execution = match cli.command {
         Commands::Go(args) => {
-            let result = commands::go::execute(&config, &args.project)?;
+            let query = args.project.join("-");
+            if query.is_empty() {
+                anyhow::bail!("project name required");
+            }
+            let result = commands::go::execute(&config, &query)?;
             print_go_result(&result, args.print_path)?;
             Ok(ExitCode::SUCCESS)
         }
@@ -150,6 +155,7 @@ fn run() -> Result<ExitCode> {
         }
         Commands::Init(args) => {
             execute_init(&config, args)?;
+            stats.command_type = "__skip_stats__".into();
             Ok(ExitCode::SUCCESS)
         }
         Commands::Do { task } => {
@@ -167,11 +173,13 @@ fn run() -> Result<ExitCode> {
     };
 
     stats.latency_ms = start.elapsed().as_millis();
-    if config.stats.enabled {
-        let db = StatsDb::open(&config.stats_db_path())?;
-        db.record(&stats)?;
+    if stats.command_type != "__skip_stats__" {
+        if config.stats.enabled {
+            let db = StatsDb::open(&config.stats_db_path())?;
+            db.record(&stats)?;
+        }
+        print_stats_line(&stats)?;
     }
-    print_stats_line(&stats)?;
     execution
 }
 
@@ -184,7 +192,6 @@ fn execute_init(config: &AppConfig, args: InitArgs) -> Result<()> {
         println!("Welcome to QuickRunner! Let's set up your project roots.");
         println!("Enter directories to scan for projects (one per line, empty line to finish):");
         println!("  Example: ~/Development");
-        println!("  Example: /Volumes/Delos/Development");
         println!();
 
         let mut roots: Vec<String> = Vec::new();
