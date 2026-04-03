@@ -158,7 +158,7 @@ fn run() -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Commands::Stats => {
-            commands::stats::display(&config.stats_db_path())?;
+            commands::stats::display(&config.stats_db_path(), config.stats.enabled)?;
             Ok(ExitCode::SUCCESS)
         }
         Commands::Scan => {
@@ -208,7 +208,7 @@ fn run() -> Result<ExitCode> {
 
     stats.latency_ms = start.elapsed().as_millis().saturating_sub(interactive_ms);
     if stats.command_type != "__skip_stats__" {
-        if config.stats.enabled {
+        if config.stats.enabled || stats.ai_used {
             let db = StatsDb::open(&config.stats_db_path())?;
             db.record(&stats)?;
         }

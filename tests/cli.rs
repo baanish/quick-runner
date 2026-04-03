@@ -10,6 +10,8 @@ use std::{
     thread,
 };
 
+use quick_runner::stats_db::StatsDb;
+
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -185,6 +187,125 @@ db_path = "__default__"
     unsafe {
         std::env::remove_var("QR_CONFIG_DIR");
         std::env::remove_var("QR_TEST_AI_KEY");
+    }
+}
+
+#[test]
+fn do_records_ai_run_when_stats_disabled() {
+    let _guard = env_lock().lock().unwrap();
+    clear_test_env();
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_dir = tmp.path().join("cfg");
+    fs::create_dir_all(&cfg_dir).unwrap();
+    fs::create_dir_all(tmp.path().join(".qr")).unwrap();
+    let server = spawn_server(
+        200,
+        r#"{"choices":[{"message":{"content":"{\"classification\":\"inline\",\"command\":\"cargo test\"}"}}],"usage":{"prompt_tokens":8,"completion_tokens":6}}"#,
+    );
+
+    fs::write(
+        cfg_dir.join("config.toml"),
+        format!(
+            r#"[general]
+default_run_mode = "output"
+
+[projects]
+roots = ["~/Development"]
+scan_depth = 2
+scan_interval_hours = 1
+
+[ai]
+protocol = "openai"
+base_url = "{server}"
+model = "demo"
+api_key = ""
+api_key_env = "QR_TEST_AI_KEY"
+
+[stats]
+enabled = false
+db_path = "__default__"
+"#
+        ),
+    )
+    .unwrap();
+    fs::write(
+        tmp.path().join(".qr/profile.json"),
+        r#"{"name":"demo-rs","language":"rust","framework":null,"package_manager":"cargo","test_command":"cargo test","build_command":"cargo build","lint_command":"cargo clippy","scripts":{"test":"cargo test"},"prefer_agent":null,"entry_points":["src/main.rs"]}"#,
+    )
+    .unwrap();
+
+    unsafe {
+        std::env::set_var("QR_CONFIG_DIR", &cfg_dir);
+        std::env::set_var("QR_TEST_AI_KEY", "token");
+    }
+
+    let mut cmd = Command::cargo_bin("qr").unwrap();
+    cmd.current_dir(tmp.path())
+        .arg("do")
+        .arg("run tests")
+        .write_stdin("n\n")
+        .assert()
+        .success();
+
+    let db = StatsDb::open(&cfg_dir.join("stats.db")).unwrap();
+    let summary = db.summary().unwrap();
+    assert_eq!(summary.total_runs, 1);
+    assert_eq!(summary.ai_assisted_runs, 1);
+    assert_eq!(summary.input_tokens, 8);
+    assert_eq!(summary.output_tokens, 6);
+
+    unsafe {
+        std::env::remove_var("QR_CONFIG_DIR");
+        std::env::remove_var("QR_TEST_AI_KEY");
+    }
+}
+
+#[test]
+fn stats_command_mentions_disabled_non_ai_tracking() {
+    let _guard = env_lock().lock().unwrap();
+    clear_test_env();
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_dir = tmp.path().join("cfg");
+    fs::create_dir_all(&cfg_dir).unwrap();
+
+    fs::write(
+        cfg_dir.join("config.toml"),
+        r#"[general]
+default_run_mode = "output"
+
+[projects]
+roots = ["~/Development"]
+scan_depth = 2
+scan_interval_hours = 1
+
+[ai]
+protocol = "anthropic"
+base_url = "https://api.anthropic.com"
+model = "demo"
+api_key = "demo-key"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[stats]
+enabled = false
+db_path = "__default__"
+"#,
+    )
+    .unwrap();
+
+    unsafe {
+        std::env::set_var("QR_CONFIG_DIR", &cfg_dir);
+    }
+
+    let mut cmd = Command::cargo_bin("qr").unwrap();
+    cmd.arg("stats")
+        .assert()
+        .success()
+        .stdout(contains(
+            "ℹ Stats tracking is disabled for non-AI commands. Run qr config to enable.",
+        ));
+
+    unsafe {
+        std::env::remove_var("QR_CONFIG_DIR");
     }
 }
 
