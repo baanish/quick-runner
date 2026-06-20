@@ -290,7 +290,10 @@ fn execute_init(config: &AppConfig, args: InitArgs) -> Result<()> {
         commands::alias::install_wrapper()?;
     }
 
-    if !args.no_cron {
+    // `--no-cron` forces a skip without prompting, keeping non-interactive
+    // `qr init` scriptable. Otherwise ask, defaulting to no since installing the
+    // cron modifies the user's crontab.
+    if !args.no_cron && prompt_bool("Install hourly project rescan cron?", false)? {
         install_cron()?;
     }
 
