@@ -9,7 +9,7 @@ QuickRunner (`qr`) is a fast Rust CLI for common developer shell workflows: jump
 - `qr alias add|list|remove` / `qr a ...`: shell alias management
 - `qr stats` / `qr s`: aggregated command stats from a local SQLite database
 - `qr scan` / `qr x`: manual project rescan
-- `qr init` / `qr i`: creates config, installs the shell wrapper, installs hourly cron, and runs an initial scan
+- `qr init` / `qr i`: creates config, installs the shell wrapper, prompts to install an hourly rescan cron (default no), and runs an initial scan
 
 ## Install
 
