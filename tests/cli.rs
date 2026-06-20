@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 use serde_json::Value;
 use std::{
@@ -354,6 +355,40 @@ y\nanthropic-compatible\n\nclaude-fallback\nconfig-fallback-key\nFALLBACK_SECRET
 
     let mode = fs::metadata(&config_path).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600);
+
+    unsafe {
+        std::env::remove_var("QR_CONFIG_DIR");
+    }
+}
+
+#[test]
+fn init_prompts_before_installing_cron_and_skips_on_no() {
+    let _guard = env_lock().lock().unwrap();
+    clear_test_env();
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_dir = tmp.path().join("cfg");
+    let project_root = tmp.path().join("projects");
+    fs::create_dir_all(&cfg_dir).unwrap();
+    fs::create_dir_all(&project_root).unwrap();
+
+    unsafe {
+        std::env::set_var("QR_CONFIG_DIR", &cfg_dir);
+    }
+
+    // No `--no-cron`, so init must prompt. Answering "n" must skip the crontab
+    // entirely (install_cron is never reached, so it cannot touch the real crontab).
+    let mut cmd = Command::cargo_bin("qr").unwrap();
+    cmd.arg("init")
+        .arg("--no-shell-wrapper")
+        .write_stdin(format!(
+            "{root}\n\nopenai-compatible\n\nopenai-model\nprimary-key\n\nn\nn\n",
+            root = project_root.display()
+        ))
+        .assert()
+        .success()
+        .stdout(contains("Install hourly project rescan cron?"))
+        .stdout(contains("installed hourly scan cron").not())
+        .stdout(contains("initial scan found"));
 
     unsafe {
         std::env::remove_var("QR_CONFIG_DIR");
