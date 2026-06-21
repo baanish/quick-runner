@@ -28,7 +28,7 @@ pub fn scan_fixture(project_count: usize, nested_dirs: usize) -> ScanFixture {
     let _guard = env_lock().lock().unwrap();
 
     unsafe {
-        std::env::set_var("XDG_CONFIG_HOME", &cfg_dir);
+        std::env::set_var("QR_CONFIG_DIR", &cfg_dir);
         std::env::set_var("HOME", tmp.path());
     }
 
@@ -66,7 +66,7 @@ pub fn go_fixture(project_count: usize) -> GoFixture {
     };
 
     unsafe {
-        std::env::set_var("XDG_CONFIG_HOME", &cfg_dir);
+        std::env::set_var("QR_CONFIG_DIR", &cfg_dir);
         std::env::set_var("HOME", tmp.path());
     }
 
