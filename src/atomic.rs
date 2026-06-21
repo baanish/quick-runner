@@ -18,12 +18,19 @@ use anyhow::{Context, Result};
 
 /// Atomically replace `path` with `contents`.
 pub fn write(path: &Path, contents: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+    // Follow a final symlink so we replace its target — as `fs::write` did —
+    // rather than clobbering the symlink itself with a regular file. This keeps
+    // dotfiles-managed symlinked rc files (e.g. `~/.zshrc` -> a versioned repo)
+    // intact.
+    let target = resolve_symlink(path);
+    let target = target.as_path();
+
+    if let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create {}", parent.display()))?;
     }
 
-    let tmp = temp_path(path);
+    let tmp = temp_path(target);
     let mut file = fs::File::create(&tmp)
         .with_context(|| format!("Failed to create temp file {}", tmp.display()))?;
     let result = file.write_all(contents).and_then(|()| file.sync_all());
@@ -35,16 +42,34 @@ pub fn write(path: &Path, contents: &[u8]) -> Result<()> {
 
     // Preserve the existing file's permissions across the replace: rename
     // installs a fresh inode, so without this an existing rc/config file's mode
-    // (e.g. a 0600 config) would reset to the default.
-    if let Ok(metadata) = fs::metadata(path) {
-        let _ = fs::set_permissions(&tmp, metadata.permissions());
+    // (e.g. a 0600 config) would reset to the default. Fail loudly rather than
+    // silently downgrade the mode.
+    if let Ok(metadata) = fs::metadata(target) {
+        if let Err(error) = fs::set_permissions(&tmp, metadata.permissions()) {
+            let _ = fs::remove_file(&tmp);
+            return Err(error).with_context(|| {
+                format!("Failed to preserve permissions on {}", target.display())
+            });
+        }
     }
 
-    if let Err(error) = fs::rename(&tmp, path) {
+    if let Err(error) = fs::rename(&tmp, target) {
         let _ = fs::remove_file(&tmp);
-        return Err(error).with_context(|| format!("Failed to replace {}", path.display()));
+        return Err(error).with_context(|| format!("Failed to replace {}", target.display()));
     }
     Ok(())
+}
+
+/// Resolve a final symlink to its real target so an atomic replacement writes
+/// through the link (matching `fs::write`) instead of clobbering it. Non-symlinks
+/// and dangling symlinks are returned unchanged.
+fn resolve_symlink(path: &Path) -> PathBuf {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+        }
+        _ => path.to_path_buf(),
+    }
 }
 
 /// A temp path in the same directory as `path` (so `rename` stays on one
@@ -97,5 +122,31 @@ mod tests {
 
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "atomic replace must preserve the file mode");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_follows_symlink_instead_of_clobbering_it() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real_rc");
+        let link = dir.path().join("link_rc");
+        write(&real, b"v1").unwrap();
+        symlink(&real, &link).unwrap();
+
+        write(&link, b"v2").unwrap();
+
+        // The symlink must survive (a dotfiles symlink, e.g. ~/.zshrc, stays a
+        // symlink) and the write must land on the real target.
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "symlink was replaced by a regular file"
+        );
+        assert_eq!(fs::read(&real).unwrap(), b"v2");
+        assert_eq!(fs::read(&link).unwrap(), b"v2");
     }
 }
