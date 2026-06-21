@@ -172,15 +172,13 @@ fn read_lines(path: &Path) -> Result<Vec<String>> {
 }
 
 fn write_lines(path: &Path, lines: &[String]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
     let mut output = lines.join("\n");
     if !output.is_empty() {
         output.push('\n');
     }
-    fs::write(path, output)?;
-    Ok(())
+    // Atomic write so an interrupted update can never truncate/corrupt the
+    // user's shell rc file (it also creates the parent directory).
+    crate::atomic::write(path, output.as_bytes())
 }
 
 #[cfg(test)]

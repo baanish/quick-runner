@@ -94,7 +94,10 @@ pub fn load_or_scan_projects(config: &AppConfig) -> Result<ProjectCache> {
 }
 
 pub fn write_project_cache(path: &Path, cache: &ProjectCache) -> Result<()> {
-    fs::write(path, serde_json::to_vec(cache)?)
+    // Atomic write: the hourly cron rescan can be rewriting this cache exactly
+    // when an interactive `qr go` reads it; a truncate-then-write would let the
+    // reader see an empty/partial file and fail to parse.
+    crate::atomic::write(path, &serde_json::to_vec(cache)?)
         .with_context(|| format!("Failed to write project cache {}", path.display()))
 }
 
