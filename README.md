@@ -1,49 +1,45 @@
 # QuickRunner
 
-QuickRunner (`qr`) is a fast Rust CLI for common developer shell workflows: jumping to projects, running scripts, managing aliases, scanning project roots, and tracking lightweight command stats. The v1 implementation follows the PRD in this repo, including shell wrapper setup, cron-based rescans, config overrides via `QR_` environment variables, and an architecture-only AI layer for future `qr do` support.
+QuickRunner (`qr`) is a fast Rust CLI for common developer shell workflows: jumping to projects, running scripts, managing aliases, scanning project roots, tracking lightweight command stats, and an AI router (`qr do`) that turns natural language into a shell command or a hand-off to a coding agent. Every config key can be overridden via `QR_` environment variables.
 
 ## Features
 
-- `qr go <project>` / `qr g <project>`: fuzzy project lookup backed by a cached scanner
-- `qr run [watch|log|output] <script>` / `qr r ...`: script runner with watch, log, and passthrough modes
-- `qr alias add|list|remove` / `qr a ...`: shell alias management
+- `qr go <project>` / `qr g`: fuzzy project lookup backed by a cached scanner (interactive picker on multiple matches)
+- `qr run [watch|log|output] <script>` / `qr r`: script runner with watch, log, and passthrough modes
+- `qr alias add|list|remove` / `qr a`: shell alias management
 - `qr stats` / `qr s`: aggregated command stats from a local SQLite database
 - `qr scan` / `qr x`: manual project rescan
-- `qr init` / `qr i`: creates config, installs the shell wrapper, prompts to install an hourly rescan cron (default no), and runs an initial scan
+- `qr do <task>` / `qr d`: natural language → a shell command (run only after explicit confirmation) or a suggested coding-agent hand-off
+- `qr learn` / `qr l`: profile the current project (language, package manager, scripts) into `./.qr/profile.json`
+- `qr config` / `qr c`: open `config.toml` in your editor (`qr config path` prints its location)
+- `qr doctor`: report the health and location of the config and project cache
+- `qr init` / `qr i`: creates config, installs the shell wrapper, optionally stores your AI key in the OS keychain, prompts to install an hourly rescan cron (default no), and runs an initial scan
 
 ## Install
 
 ```bash
-cargo build --release
-./target/release/qr --help
+cargo install --path .   # or: cargo build --release  (binary at target/release/qr)
+qr init                  # config + shell wrapper + initial scan
+exec $SHELL              # reload so the `qr go` wrapper takes effect
 ```
+
+`qr init` appends a wrapper function to your shell rc file so `qr go` can change the parent shell's directory — a child process can't do that on its own. The wrapper calls `qr go --print-path` and runs the `cd` in your shell.
 
 ## Config
 
-QuickRunner reads `~/.config/qr/config.toml` and falls back to built-in defaults from [`config/default.toml`](config/default.toml).
+Run `qr config path` to print the exact location. It is platform-specific:
 
-Environment variables override every config key:
+- macOS: `~/Library/Application Support/qr/config.toml`
+- Linux: `~/.config/qr/config.toml` (or `$XDG_CONFIG_HOME/qr/`)
 
-- `QR_DEFAULT_RUN_MODE`
-- `QR_PROJECT_ROOTS` as colon-separated paths
-- `QR_SCAN_DEPTH`
-- `QR_SCAN_INTERVAL_HOURS`
-- `QR_AI_PROTOCOL`
-- `QR_AI_BASE_URL`
-- `QR_AI_MODEL`
-- `QR_AI_API_KEY_ENV`
-- `QR_AI_FALLBACK_PROTOCOL`
-- `QR_AI_FALLBACK_BASE_URL`
-- `QR_AI_FALLBACK_MODEL`
-- `QR_AI_FALLBACK_API_KEY_ENV`
-- `QR_STATS_ENABLED`
-- `QR_STATS_DB_PATH`
+Defaults come from [`config/default.toml`](config/default.toml). Environment variables (`QR_*`) override every config key — e.g. `QR_PROJECT_ROOTS` (colon-separated), `QR_SCAN_DEPTH`, `QR_AI_MODEL`, `QR_STATS_ENABLED`; see `config/default.toml` for the full list.
 
-## Shell Integration
+### AI key
 
-`qr go` cannot change the parent shell directory on its own, so `qr init` appends a wrapper function to your shell rc file. The wrapper calls `qr go --print-path` and performs the `cd` in the parent shell.
+`qr do` / `qr learn` need an API key. It is resolved in this order: a custom env var (`api_key_env`), the protocol's well-known env var (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY`), the `api_key` in `config.toml`, then the OS keychain. `qr init` offers to store the key in the OS keychain (recommended) so it stays out of `config.toml`.
 
 ## Notes
 
-- Stats are printed after each command on `stderr` so `--print-path` stays scriptable.
-- The AI client and protocol abstraction are present for v1, but `qr do` intentionally returns a v2 message.
+- The stats line is printed on `stderr`, so `qr go --print-path` keeps stdout clean for the shell wrapper's `cd`.
+- `qr do` never runs a command on a bare Enter: you must explicitly type `y`, and commands using shell features (pipes, redirection, multiple commands) get an extra warning.
+- Recording stats writes to SQLite on each command (best-effort — a failure never fails the command). Disable with `stats.enabled = false`.
