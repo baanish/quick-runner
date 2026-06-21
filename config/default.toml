@@ -37,11 +37,9 @@ auto_approve = [
   "ls",
   "cat",
   "grep",
-  "find",
   "echo",
   "mkdir",
   "touch",
-  "rm",
 ]
 
 [do.agents]

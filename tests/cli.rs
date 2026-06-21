@@ -395,6 +395,104 @@ fn init_prompts_before_installing_cron_and_skips_on_no() {
     }
 }
 
+#[test]
+fn do_inline_command_does_not_run_on_bare_enter() {
+    let _guard = env_lock().lock().unwrap();
+    clear_test_env();
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_dir = tmp.path().join("cfg");
+    fs::create_dir_all(&cfg_dir).unwrap();
+    let server = spawn_server(
+        200,
+        r#"{"choices":[{"message":{"content":"{\"classification\":\"inline\",\"command\":\"touch MARKER\"}"}}],"usage":{"prompt_tokens":8,"completion_tokens":6}}"#,
+    );
+    fs::write(cfg_dir.join("config.toml"), do_inline_test_config(&server)).unwrap();
+    unsafe {
+        std::env::set_var("QR_CONFIG_DIR", &cfg_dir);
+        std::env::set_var("QR_TEST_AI_KEY", "token");
+    }
+
+    // Empty stdin = a bare Enter / EOF. The allow-listed `touch` command must NOT
+    // execute: every AI-generated command now defaults to No.
+    Command::cargo_bin("qr")
+        .unwrap()
+        .current_dir(tmp.path())
+        .arg("do")
+        .arg("make a marker")
+        .write_stdin("")
+        .assert()
+        .success();
+    assert!(
+        !tmp.path().join("MARKER").exists(),
+        "inline command must not run without an explicit 'y'"
+    );
+
+    unsafe {
+        std::env::remove_var("QR_CONFIG_DIR");
+        std::env::remove_var("QR_TEST_AI_KEY");
+    }
+}
+
+#[test]
+fn do_inline_command_runs_on_explicit_yes() {
+    let _guard = env_lock().lock().unwrap();
+    clear_test_env();
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_dir = tmp.path().join("cfg");
+    fs::create_dir_all(&cfg_dir).unwrap();
+    let server = spawn_server(
+        200,
+        r#"{"choices":[{"message":{"content":"{\"classification\":\"inline\",\"command\":\"touch MARKER\"}"}}],"usage":{"prompt_tokens":8,"completion_tokens":6}}"#,
+    );
+    fs::write(cfg_dir.join("config.toml"), do_inline_test_config(&server)).unwrap();
+    unsafe {
+        std::env::set_var("QR_CONFIG_DIR", &cfg_dir);
+        std::env::set_var("QR_TEST_AI_KEY", "token");
+    }
+
+    Command::cargo_bin("qr")
+        .unwrap()
+        .current_dir(tmp.path())
+        .arg("do")
+        .arg("make a marker")
+        .write_stdin("y\n")
+        .assert()
+        .success();
+    assert!(
+        tmp.path().join("MARKER").exists(),
+        "inline command should run after an explicit 'y'"
+    );
+
+    unsafe {
+        std::env::remove_var("QR_CONFIG_DIR");
+        std::env::remove_var("QR_TEST_AI_KEY");
+    }
+}
+
+fn do_inline_test_config(server: &str) -> String {
+    format!(
+        r#"[general]
+default_run_mode = "output"
+
+[projects]
+roots = ["~/Development"]
+scan_depth = 2
+scan_interval_hours = 1
+
+[ai]
+protocol = "openai"
+base_url = "{server}"
+model = "demo"
+api_key = ""
+api_key_env = "QR_TEST_AI_KEY"
+
+[stats]
+enabled = false
+db_path = "__default__"
+"#
+    )
+}
+
 fn spawn_server(status: u16, body: &'static str) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
