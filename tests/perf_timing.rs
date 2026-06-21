@@ -25,12 +25,23 @@ fn scan_timing_flow_runs_against_library_api() {
     fs::write(root.join("demo/.git/config"), "").unwrap();
 
     unsafe {
-        std::env::set_var("XDG_CONFIG_HOME", &cfg_dir);
+        std::env::set_var("QR_CONFIG_DIR", &cfg_dir);
     }
 
     let mut config = AppConfig::load_from_env_with_path(cfg_dir.join("config.toml")).unwrap();
     config.projects.roots = vec![root.display().to_string()];
     config.stats.db_path = cfg_dir.join("stats.db").display().to_string();
+
+    // Regression guard (test isolation): the cache must resolve inside the temp
+    // config dir, never the developer's real one. QR_CONFIG_DIR is honored on every
+    // OS; XDG_CONFIG_HOME is a no-op on macOS, which previously let `cargo test`
+    // overwrite the real ~/Library/Application Support/qr cache.
+    assert!(
+        config.cache_path().starts_with(&cfg_dir),
+        "cache path {:?} escaped the temp config dir {:?}",
+        config.cache_path(),
+        cfg_dir
+    );
 
     let started = Instant::now();
     let cache = scan_projects(&config).unwrap();
@@ -41,7 +52,7 @@ fn scan_timing_flow_runs_against_library_api() {
     eprintln!("scan_timing_flow_runs_against_library_api={elapsed:?}");
 
     unsafe {
-        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("QR_CONFIG_DIR");
     }
 }
 
@@ -52,11 +63,17 @@ fn go_timing_flow_hits_cache_end_to_end() {
     let cfg_dir = tmp.path().join("cfg");
 
     unsafe {
-        std::env::set_var("XDG_CONFIG_HOME", &cfg_dir);
+        std::env::set_var("QR_CONFIG_DIR", &cfg_dir);
     }
 
     let mut config = AppConfig::load_from_env_with_path(cfg_dir.join("config.toml")).unwrap();
     config.stats.db_path = cfg_dir.join("stats.db").display().to_string();
+    assert!(
+        config.cache_path().starts_with(&cfg_dir),
+        "cache path {:?} escaped the temp config dir {:?}",
+        config.cache_path(),
+        cfg_dir
+    );
     config.ensure_parent_dirs().unwrap();
     write_project_cache(
         &config.cache_path(),
@@ -80,7 +97,7 @@ fn go_timing_flow_hits_cache_end_to_end() {
     eprintln!("go_timing_flow_hits_cache_end_to_end={elapsed:?}");
 
     unsafe {
-        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("QR_CONFIG_DIR");
     }
 }
 
