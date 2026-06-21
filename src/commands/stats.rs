@@ -26,7 +26,11 @@ pub fn display(path: &Path, stats_enabled: bool) -> Result<StatsSummary> {
     println!("Est. cost:         ${:.3}", summary.estimated_cost_usd);
     println!("Provider:          {}", summary.last_provider);
     println!("─────────────────");
-    if !stats_enabled {
+    if stats_enabled {
+        println!(
+            "ℹ Recording stats writes to SQLite on every command, which adds a few ms. Set stats.enabled = false to disable."
+        );
+    } else {
         println!("ℹ Stats tracking is disabled for non-AI commands. Run qr config to enable.");
     }
 
