@@ -227,12 +227,21 @@ fn run_with_config(command: Commands) -> Result<ExitCode> {
     stats.latency_ms = start.elapsed().as_millis().saturating_sub(interactive_ms);
     if stats.command_type != "__skip_stats__" {
         if config.stats.enabled || stats.ai_used {
-            let db = StatsDb::open(&config.stats_db_path())?;
-            db.record(&stats)?;
+            // Best-effort: a stats-DB failure (SQLITE_BUSY from a concurrent qr,
+            // a read-only or full disk) must never turn a command that already
+            // succeeded into a failure. Warn and carry on.
+            if let Err(error) = record_stats(&config, &stats) {
+                eprintln!("warning: could not record stats: {error:#}");
+            }
         }
         print_stats_line(&stats, config.stats.enabled)?;
     }
     execution
+}
+
+fn record_stats(config: &AppConfig, stats: &CommandStats) -> Result<()> {
+    let db = StatsDb::open(&config.stats_db_path())?;
+    db.record(stats)
 }
 
 fn execute_init(config: &AppConfig, args: InitArgs) -> Result<()> {

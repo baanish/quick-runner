@@ -470,6 +470,47 @@ fn do_inline_command_runs_on_explicit_yes() {
 }
 
 #[test]
+fn command_succeeds_when_stats_recording_fails() {
+    let _guard = env_lock().lock().unwrap();
+    clear_test_env();
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_dir = tmp.path().join("cfg");
+    let roots = tmp.path().join("roots");
+    fs::create_dir_all(&roots).unwrap();
+    // A directory where a DB file is expected makes StatsDb::open fail at record
+    // time (after ensure_parent_dirs has already succeeded).
+    let blocked_db = tmp.path().join("blocked.db");
+    fs::create_dir_all(&blocked_db).unwrap();
+
+    unsafe {
+        std::env::set_var("QR_CONFIG_DIR", &cfg_dir);
+        std::env::set_var("QR_PROJECT_ROOTS", roots.display().to_string());
+        std::env::set_var("QR_STATS_ENABLED", "true");
+        std::env::set_var("QR_STATS_DB_PATH", blocked_db.display().to_string());
+    }
+
+    // The command must still succeed (with a warning on stderr), not fail because
+    // stats could not be recorded.
+    Command::cargo_bin("qr")
+        .unwrap()
+        .arg("scan")
+        .assert()
+        .success()
+        .stderr(contains("could not record stats"));
+
+    unsafe {
+        for key in [
+            "QR_CONFIG_DIR",
+            "QR_PROJECT_ROOTS",
+            "QR_STATS_ENABLED",
+            "QR_STATS_DB_PATH",
+        ] {
+            std::env::remove_var(key);
+        }
+    }
+}
+
+#[test]
 fn config_free_commands_work_with_a_corrupt_config() {
     let _guard = env_lock().lock().unwrap();
     clear_test_env();
