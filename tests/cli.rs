@@ -469,6 +469,48 @@ fn do_inline_command_runs_on_explicit_yes() {
     }
 }
 
+#[test]
+fn config_free_commands_work_with_a_corrupt_config() {
+    let _guard = env_lock().lock().unwrap();
+    clear_test_env();
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_dir = tmp.path().join("cfg");
+    fs::create_dir_all(&cfg_dir).unwrap();
+    // Unterminated table header — invalid TOML.
+    fs::write(cfg_dir.join("config.toml"), "[broken").unwrap();
+    unsafe {
+        std::env::set_var("QR_CONFIG_DIR", &cfg_dir);
+    }
+
+    // `qr config path` must work despite the corrupt config: it is dispatched
+    // before the config load, so a broken config can't brick its own recovery.
+    Command::cargo_bin("qr")
+        .unwrap()
+        .args(["config", "path"])
+        .assert()
+        .success()
+        .stdout(contains("config.toml"));
+
+    // `qr doctor` must run and flag the config as invalid.
+    Command::cargo_bin("qr")
+        .unwrap()
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(contains("INVALID"));
+
+    // A config-dependent command still fails clearly rather than silently.
+    Command::cargo_bin("qr")
+        .unwrap()
+        .args(["go", "whatever", "--print-path"])
+        .assert()
+        .failure();
+
+    unsafe {
+        std::env::remove_var("QR_CONFIG_DIR");
+    }
+}
+
 fn do_inline_test_config(server: &str) -> String {
     format!(
         r#"[general]
