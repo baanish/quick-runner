@@ -25,6 +25,20 @@ shlex = "2.0.1"
 toml = "0.9.8"
 walkdir = "2.5.0"
 
+# OS keychain for API-key storage, via per-platform native backends. All are
+# pure Rust with no system-library/dev-package requirements, so CI builds clean.
+# macOS Keychain and Windows Credential Manager persist normally; the Linux
+# kernel-keyutils backend is session-scoped (not retained across reboot) — a
+# persistent Secret Service backend can be added later if needed.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["linux-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
+
 [dev-dependencies]
 assert_cmd = "2.1.1"
 criterion = { version = "0.5.1", features = ["html_reports"] }

@@ -330,7 +330,7 @@ fn init_collects_ai_provider_settings_and_writes_secure_config() {
         .arg("--no-cron")
         .write_stdin(format!(
             "{root}\n\nopenai-compatible\n\nopenai-model\nconfig-primary-key\n\n\
-y\nanthropic-compatible\n\nclaude-fallback\nconfig-fallback-key\nFALLBACK_SECRET\n",
+n\ny\nanthropic-compatible\n\nclaude-fallback\nconfig-fallback-key\nFALLBACK_SECRET\n",
             root = project_root.display()
         ))
         .assert()
