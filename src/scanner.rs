@@ -83,13 +83,23 @@ pub fn scan_projects(config: &AppConfig) -> Result<ProjectCache> {
 pub fn load_or_scan_projects(config: &AppConfig) -> Result<ProjectCache> {
     let path = config.cache_path();
     if path.exists() {
-        let cache = read_project_cache(&path)?;
-        if !cache.projects.is_empty() {
-            return Ok(cache);
+        match read_project_cache(&path) {
+            Ok(cache) if !cache.projects.is_empty() => return Ok(cache),
+            Ok(_) => eprintln!("Project cache is empty; scanning..."),
+            Err(error) => {
+                // Corrupt or partially-written cache (e.g. truncated by an
+                // interrupted or racing write): move it aside and rescan rather
+                // than hard-failing `qr go`.
+                eprintln!(
+                    "Project cache {} is unreadable ({error}); moving it aside and rescanning",
+                    path.display()
+                );
+                let _ = fs::rename(&path, path.with_extension("corrupt"));
+            }
         }
-        // Cache exists but is empty — rescan
+    } else {
+        eprintln!("No project cache found; scanning...");
     }
-    eprintln!("No project cache found, scanning...");
     scan_projects(config)
 }
 
@@ -301,5 +311,38 @@ mod tests {
         let restored = read_project_cache(&path).unwrap();
         assert_eq!(restored.scanned_at_unix_ms, 42);
         assert_eq!(restored.projects, cache.projects);
+    }
+
+    #[test]
+    fn load_or_scan_recovers_from_corrupt_cache() {
+        let _guard = env_lock().lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("dev");
+        let cfg_dir = tmp.path().join("cfg");
+        fs::create_dir_all(root.join("proj/.git")).unwrap();
+        fs::write(root.join("proj/.git/config"), "").unwrap();
+
+        unsafe {
+            std::env::set_var("QR_CONFIG_DIR", &cfg_dir);
+        }
+
+        let mut config = AppConfig::load_from_env_with_path(cfg_dir.join("config.toml")).unwrap();
+        config.projects.roots = vec![root.display().to_string()];
+        config.stats.db_path = cfg_dir.join("stats.db").display().to_string();
+        config.ensure_parent_dirs().unwrap();
+        // Simulate a truncated/garbage cache from an interrupted or racing write.
+        fs::write(config.cache_path(), b"{ not valid json").unwrap();
+
+        // Must self-heal (rescan) rather than propagate a parse error.
+        let cache = load_or_scan_projects(&config).unwrap();
+        assert_eq!(cache.projects.len(), 1);
+        assert!(
+            config.cache_path().with_extension("corrupt").exists(),
+            "corrupt cache should be moved aside"
+        );
+
+        unsafe {
+            std::env::remove_var("QR_CONFIG_DIR");
+        }
     }
 }
