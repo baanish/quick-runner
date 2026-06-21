@@ -609,6 +609,29 @@ fn go_print_path_writes_only_the_path_to_stdout() {
     }
 }
 
+#[test]
+fn run_executes_positional_script_with_mode_flag() {
+    let _guard = env_lock().lock().unwrap();
+    clear_test_env();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("QR_CONFIG_DIR", tmp.path().join("cfg"));
+    }
+
+    // The mode is a flag; the positional is always the script (so a command
+    // starting with `watch`/`log`/`output` is no longer swallowed as a mode).
+    Command::cargo_bin("qr")
+        .unwrap()
+        .args(["run", "--output", "echo", "hello-from-run"])
+        .assert()
+        .success()
+        .stdout(contains("hello-from-run"));
+
+    unsafe {
+        std::env::remove_var("QR_CONFIG_DIR");
+    }
+}
+
 fn spawn_server(status: u16, body: &'static str) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();

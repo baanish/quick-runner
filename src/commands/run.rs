@@ -33,25 +33,25 @@ pub struct RunResult {
     pub log_path: Option<String>,
 }
 
-pub fn parse_args(config: &AppConfig, parts: &[String]) -> Result<(RunMode, String)> {
-    if parts.is_empty() {
-        return Err(anyhow!("Usage: qr run [watch|log|output] <script>"));
+/// Resolve the run mode from the mutually-exclusive `--watch`/`--log`/`--output`
+/// flags, falling back to the configured default when none is set. The script is
+/// always the positional argument(s), so a command starting with `watch`/`log`/
+/// `output` is no longer mistaken for a mode (clap guarantees at most one flag).
+pub fn resolve_mode(config: &AppConfig, watch: bool, log: bool, output: bool) -> Result<RunMode> {
+    if watch {
+        Ok(RunMode::Watch)
+    } else if log {
+        Ok(RunMode::Log)
+    } else if output {
+        Ok(RunMode::Output)
+    } else {
+        RunMode::parse(&config.general.default_run_mode).ok_or_else(|| {
+            anyhow!(
+                "Invalid default_run_mode '{}'",
+                config.general.default_run_mode
+            )
+        })
     }
-
-    if let Some(mode) = RunMode::parse(&parts[0]) {
-        if parts.len() < 2 {
-            return Err(anyhow!("Missing script after mode '{}'", parts[0]));
-        }
-        return Ok((mode, parts[1..].join(" ")));
-    }
-
-    let default = RunMode::parse(&config.general.default_run_mode).ok_or_else(|| {
-        anyhow!(
-            "Invalid default_run_mode '{}'",
-            config.general.default_run_mode
-        )
-    })?;
-    Ok((default, parts.join(" ")))
 }
 
 pub fn execute(mode: RunMode, script: &str) -> Result<RunResult> {
@@ -147,28 +147,30 @@ mod tests {
     use crate::config::AppConfig;
 
     #[test]
-    fn run_args_use_default_mode() {
+    fn resolve_mode_uses_default_when_no_flag() {
         let mut config = AppConfig::load_from_env_with_path(
             tempfile::tempdir().unwrap().path().join("config.toml"),
         )
         .unwrap();
         config.general.default_run_mode = "watch".into();
 
-        let (mode, script) = parse_args(&config, &["echo".into(), "hi".into()]).unwrap();
-        assert_eq!(mode, RunMode::Watch);
-        assert_eq!(script, "echo hi");
+        assert_eq!(
+            resolve_mode(&config, false, false, false).unwrap(),
+            RunMode::Watch
+        );
     }
 
     #[test]
-    fn run_args_detect_explicit_mode() {
+    fn resolve_mode_flag_overrides_default() {
         let config = AppConfig::load_from_env_with_path(
             tempfile::tempdir().unwrap().path().join("config.toml"),
         )
         .unwrap();
 
-        let (mode, script) =
-            parse_args(&config, &["log".into(), "cargo".into(), "test".into()]).unwrap();
-        assert_eq!(mode, RunMode::Log);
-        assert_eq!(script, "cargo test");
+        assert_eq!(resolve_mode(&config, false, true, false).unwrap(), RunMode::Log);
+        assert_eq!(
+            resolve_mode(&config, true, false, false).unwrap(),
+            RunMode::Watch
+        );
     }
 }
