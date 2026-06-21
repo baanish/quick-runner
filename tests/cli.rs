@@ -576,6 +576,39 @@ db_path = "__default__"
     )
 }
 
+#[test]
+fn go_print_path_writes_only_the_path_to_stdout() {
+    let _guard = env_lock().lock().unwrap();
+    clear_test_env();
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_dir = tmp.path().join("cfg");
+    fs::create_dir_all(&cfg_dir).unwrap();
+    unsafe {
+        std::env::set_var("QR_CONFIG_DIR", &cfg_dir);
+    }
+    // Seed a cache with a single uniquely-named project so `qr go` resolves it
+    // immediately (no picker, no rescan, no stderr noise).
+    fs::write(
+        cfg_dir.join("projects-cache.json"),
+        r#"{"scanned_at_unix_ms":1,"projects":[{"name":"solo-proj","path":"/tmp/solo-proj","source":"git"}]}"#,
+    )
+    .unwrap();
+
+    // The --print-path contract the shell wrapper depends on: stdout is EXACTLY
+    // the path (it `cd`s to it), everything else goes to stderr. Pinned so a
+    // stray println! can't silently break `cd`.
+    Command::cargo_bin("qr")
+        .unwrap()
+        .args(["go", "solo-proj", "--print-path"])
+        .assert()
+        .success()
+        .stdout("/tmp/solo-proj\n");
+
+    unsafe {
+        std::env::remove_var("QR_CONFIG_DIR");
+    }
+}
+
 fn spawn_server(status: u16, body: &'static str) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
