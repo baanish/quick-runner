@@ -188,7 +188,7 @@ pub fn default_config_str() -> &'static str {
 fn default_auto_approve() -> Vec<String> {
     [
         "cargo", "npm", "pnpm", "yarn", "pip", "pytest", "make", "git", "ls", "cat", "grep",
-        "find", "echo", "mkdir", "touch", "rm",
+        "echo", "mkdir", "touch",
     ]
     .into_iter()
     .map(ToOwned::to_owned)
