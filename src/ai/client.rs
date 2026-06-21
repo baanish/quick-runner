@@ -122,6 +122,7 @@ impl AiClient {
 }
 
 fn resolve_api_key(provider: &ProviderConfig) -> Result<String> {
+    // 1. explicit per-provider env var (highest-precedence override)
     if !provider.api_key_env.trim().is_empty() {
         if let Ok(value) = env::var(&provider.api_key_env) {
             if !value.trim().is_empty() {
@@ -130,6 +131,7 @@ fn resolve_api_key(provider: &ProviderConfig) -> Result<String> {
         }
     }
 
+    // 2. well-known env var for the protocol
     let well_known_env = provider.protocol.default_api_key_env();
     if let Ok(value) = env::var(well_known_env) {
         if !value.trim().is_empty() {
@@ -137,12 +139,23 @@ fn resolve_api_key(provider: &ProviderConfig) -> Result<String> {
         }
     }
 
+    // 3. config file (only when the key was explicitly stored there)
     if !provider.api_key.trim().is_empty() {
         return Ok(provider.api_key.clone());
     }
 
+    // 4. OS keychain — where `qr init` stores the key when you opt in. Checked
+    //    last because it is only populated when the key is NOT in env or config,
+    //    so the common paths never touch the keychain backend.
+    let account = crate::secret::account_for(&provider.api_key_env, well_known_env);
+    if let Some(value) = crate::secret::get(&account) {
+        if !value.trim().is_empty() {
+            return Ok(value);
+        }
+    }
+
     Err(anyhow!(
-        "Missing API key. Checked {}, {}, then config.toml",
+        "Missing API key. Checked {}, {}, config.toml, then the OS keychain",
         if provider.api_key_env.trim().is_empty() {
             "<no custom env var configured>"
         } else {

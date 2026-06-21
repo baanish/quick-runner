@@ -4,5 +4,6 @@ pub mod config;
 pub mod picker;
 pub mod project_profile;
 pub mod scanner;
+pub mod secret;
 pub mod shell;
 pub mod stats_db;
