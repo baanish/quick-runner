@@ -24,7 +24,7 @@ pub fn execute(config: &AppConfig, query: &str) -> Result<GoResult> {
     let mut interactive_ms: u128 = 0;
     let selected = if matches.len() == 1 {
         matches[0].clone()
-    } else if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+    } else if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
         let labels = matches
             .iter()
             .map(|entry| format!("{} ({})", entry.name, entry.path))

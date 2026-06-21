@@ -8,29 +8,50 @@ use crossterm::{
     terminal::{self, ClearType},
 };
 
+/// Restores the terminal (cursor + cooked mode) on every exit path — including
+/// early `?` errors and panics — so a crash mid-pick can never leave the user's
+/// shell in raw mode with a hidden cursor.
+struct RawModeGuard;
+
+impl RawModeGuard {
+    fn enter() -> Result<Self> {
+        terminal::enable_raw_mode()?;
+        execute!(io::stderr(), cursor::Hide)?;
+        Ok(Self)
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = execute!(io::stderr(), cursor::Show);
+        let _ = terminal::disable_raw_mode();
+    }
+}
+
 pub fn pick_index(options: &[String]) -> Result<Option<usize>> {
     if options.is_empty() {
         return Ok(None);
     }
 
-    let mut stdout = io::stdout();
-    terminal::enable_raw_mode()?;
-    execute!(stdout, cursor::Hide)?;
+    // The menu is drawn on stderr, not stdout, so the picker works under the
+    // installed shell wrapper, which captures stdout (`dir=$(qr go … --print-path)`)
+    // while leaving stderr on the terminal. The guard restores the terminal on
+    // every return path.
+    let _guard = RawModeGuard::enter()?;
 
     let mut page = 0usize;
     let per_page = 9usize;
 
     loop {
         render_page(options, page, per_page, None)?;
-        match event::read()? {
-            Event::Key(key) => match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => break,
+        if let Event::Key(key) = event::read()? {
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => return Ok(None),
                 KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
                     let index = c.to_digit(10).unwrap() as usize - 1;
                     let absolute = page * per_page + index;
                     if absolute < options.len() {
                         render_page(options, page, per_page, Some(absolute))?;
-                        cleanup()?;
                         return Ok(Some(absolute));
                     }
                 }
@@ -41,13 +62,9 @@ pub fn pick_index(options: &[String]) -> Result<Option<usize>> {
                     page -= 1;
                 }
                 _ => {}
-            },
-            _ => {}
+            }
         }
     }
-
-    cleanup()?;
-    Ok(None)
 }
 
 fn render_page(
@@ -56,16 +73,16 @@ fn render_page(
     per_page: usize,
     selected_absolute: Option<usize>,
 ) -> Result<()> {
-    let mut stdout = io::stdout();
+    let mut stderr = io::stderr();
     let start = page * per_page;
     let end = options.len().min(start + per_page);
 
     execute!(
-        stdout,
+        stderr,
         terminal::Clear(ClearType::All),
         cursor::MoveTo(0, 0)
     )?;
-    write!(stdout, "Multiple matches found:\r\n")?;
+    write!(stderr, "Multiple matches found:\r\n")?;
     for (display_index, value) in options[start..end].iter().enumerate() {
         let absolute = start + display_index;
         let marker = if selected_absolute == Some(absolute) {
@@ -73,23 +90,13 @@ fn render_page(
         } else {
             " "
         };
-        write!(stdout, "{marker} {}) {}\r\n", display_index + 1, value)?;
+        write!(stderr, "{marker} {}) {}\r\n", display_index + 1, value)?;
     }
     if end < options.len() || page > 0 {
-        write!(
-            stdout,
-            "Use arrows to change page. Press 1-9, ESC, or q.\r\n"
-        )?;
+        write!(stderr, "Use arrows to change page. Press 1-9, ESC, or q.\r\n")?;
     } else {
-        write!(stdout, "Press 1-9, ESC, or q.\r\n")?;
+        write!(stderr, "Press 1-9, ESC, or q.\r\n")?;
     }
-    stdout.flush()?;
-    Ok(())
-}
-
-fn cleanup() -> Result<()> {
-    let mut stdout = io::stdout();
-    execute!(stdout, cursor::Show)?;
-    terminal::disable_raw_mode()?;
+    stderr.flush()?;
     Ok(())
 }
