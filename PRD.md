@@ -376,7 +376,7 @@ scan_interval_hours = 1
 protocol = "openai"  # "openai" or "anthropic"
 base_url = "https://api.fireworks.ai/inference/v1"  # any OpenAI-compatible endpoint
 model = "accounts/fireworks/models/llama-v3p1-70b-instruct"
-api_key_env = "QR_API_KEY"  # read from env var, never stored in config
+api_key_env = "QR_API_KEY"  # env var name for the key; the key itself can be stored in the OS keychain (via qr init), an env var, or config.toml
 
 [ai.fallback]
 protocol = "openai"
@@ -455,8 +455,8 @@ This is critical — a subprocess can't change the parent's cwd. The `qr` binary
 | `qr stats` | ✅ |
 | `qr scan` (manual rescan) | ✅ |
 | `qr init` (first-time setup) | ✅ |
-| `qr do <task>` (classify + route) | ❌ v2 |
-| `qr learn` (project profiling) | ❌ v2 |
+| `qr do <task>` (classify + route) | ✅ |
+| `qr learn` (project profiling) | ✅ |
 | AI-powered fuzzy matching | ❌ v2 (deterministic fuzzy in v1) |
 | Plugin system | ❌ v2+ |
 
@@ -473,4 +473,4 @@ This is critical — a subprocess can't change the parent's cwd. The `qr` binary
 All resolved:
 - **License**: MIT
 - **Shell function installer**: `qr init` appends the shell wrapper by default, with `--no-shell-wrapper` to skip
-- **Cron setup**: `qr init` sets up the hourly scan cron by default, with `--no-cron` to skip
+- **Cron setup**: `qr init` prompts whether to install the hourly scan cron (default no); `--no-cron` skips the prompt entirely
