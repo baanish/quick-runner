@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod atomic;
 pub mod commands;
 pub mod config;
 pub mod picker;
