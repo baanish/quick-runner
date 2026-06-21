@@ -36,6 +36,12 @@ impl StatsDb {
             fs::create_dir_all(parent)?;
         }
         let connection = Connection::open(path)?;
+        // Wait for a concurrent writer rather than failing immediately with
+        // "database is locked" — several qr invocations can record at once.
+        connection.busy_timeout(std::time::Duration::from_secs(3))?;
+        // WAL lets a reader (qr stats) run alongside a writer. Best-effort: it is
+        // unsupported on some filesystems, and stats are non-critical.
+        let _ = connection.pragma_update(None, "journal_mode", "WAL");
         let db = Self { connection };
         db.ensure_schema()?;
         Ok(db)
