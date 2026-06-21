@@ -15,9 +15,13 @@ struct RawModeGuard;
 
 impl RawModeGuard {
     fn enter() -> Result<Self> {
+        // Construct the guard first so its Drop restores the terminal even if a
+        // step below fails partway (e.g. enable_raw_mode succeeds but Hide errors).
+        // disable_raw_mode / Show are harmless no-ops if their step never ran.
+        let guard = Self;
         terminal::enable_raw_mode()?;
         execute!(io::stderr(), cursor::Hide)?;
-        Ok(Self)
+        Ok(guard)
     }
 }
 
