@@ -65,7 +65,16 @@ struct GoArgs {
 
 #[derive(Args)]
 struct RunArgs {
-    #[arg(required = true)]
+    /// Run silently and report only pass/fail
+    #[arg(long, group = "run_mode")]
+    watch: bool,
+    /// Write output to a timestamped log file
+    #[arg(long, group = "run_mode")]
+    log: bool,
+    /// Stream output to the terminal (default)
+    #[arg(long, group = "run_mode")]
+    output: bool,
+    #[arg(required = true, trailing_var_arg = true)]
     parts: Vec<String>,
 }
 
@@ -157,7 +166,8 @@ fn run_with_config(command: Commands) -> Result<ExitCode> {
             unreachable!("config-independent commands are dispatched before config load")
         }
         Commands::Run(args) => {
-            let (mode, script) = commands::run::parse_args(&config, &args.parts)?;
+            let mode = commands::run::resolve_mode(&config, args.watch, args.log, args.output)?;
+            let script = args.parts.join(" ");
             let result = commands::run::execute(mode, &script)?;
             if let Some(path) = result.log_path {
                 let _ = path;
