@@ -97,41 +97,34 @@ fn parse_classification(raw: &str) -> Result<ParsedClassification> {
     serde_json::from_str(raw).context("Failed to parse AI classification JSON")
 }
 
-/// Characters that require the shell to interpret correctly: command chaining,
-/// pipes, redirection, command substitution, subshells, and globbing. A command
-/// containing any of these is never auto-approved and only ever runs through
-/// `/bin/sh -c` after an explicit `y` — so an allow-listed first token can no
-/// longer smuggle a chained payload (e.g. `git status; rm -rf ~`) past the gate,
-/// while benign globs (`ls *.rs`) still expand correctly once the user confirms.
-/// (Leading `~` is handled separately by expand_argv on the direct path.)
-const SHELL_METACHARACTERS: &[char] =
-    &[';', '|', '&', '<', '>', '$', '`', '(', ')', '*', '?', '\n', '\r'];
+/// Characters that let a command chain, pipe, redirect, or substitute another
+/// command: separators, pipes, redirection, command substitution, and subshells.
+/// Their presence earns the strongest warning. A command WITHOUT any of these can
+/// only run a single program (with ordinary word/glob/tilde expansion) through
+/// the shell, so it cannot smuggle a chained payload (e.g. `git status; rm -rf ~`)
+/// past the user. Globs and `~` are intentionally NOT here: they are benign
+/// argument expansions the shell performs, not a way to run a second command.
+const SHELL_METACHARACTERS: &[char] = &[';', '|', '&', '<', '>', '$', '`', '(', ')', '\n', '\r'];
 
 fn uses_shell_features(command: &str) -> bool {
     command.contains(SHELL_METACHARACTERS)
 }
 
-/// How an inline command may be executed.
-#[derive(Debug, PartialEq, Eq)]
-enum InlinePlan {
-    /// A single command parsed to argv with no shell metacharacters. Executed
-    /// directly via the OS (no shell), so nothing in the string is interpreted.
-    Direct { argv: Vec<String>, allowlisted: bool },
-    /// Uses shell features, or could not be parsed as a single command. Only run
-    /// via `/bin/sh -c`, and only after an explicit `y`.
-    Shell,
-}
-
-fn plan_inline(command: &str, allowlist: &[String]) -> InlinePlan {
+/// The confirmation prompt for an inline command. Every confirmed command runs
+/// through `/bin/sh -c`; the wording reflects how trustworthy it looks. The
+/// allow-list only softens the prompt — it is not a safety guarantee, since
+/// allow-listed programs (`git -c alias=…`, `make -f`, `npm run`, `cargo build`'s
+/// build.rs) execute attacker-controlled code without any shell metacharacter.
+fn inline_prompt(command: &str, allowlist: &[String]) -> String {
     if uses_shell_features(command) {
-        return InlinePlan::Shell;
+        return "⚠ Command uses shell features (pipes, redirection, or multiple commands). Run anyway?".to_string();
     }
-    match shlex::split(command) {
-        Some(argv) if !argv.is_empty() => {
-            let allowlisted = allowlist.iter().any(|allowed| allowed == &argv[0]);
-            InlinePlan::Direct { argv, allowlisted }
+    match shlex::split(command).as_deref() {
+        Some([program, ..]) if allowlist.iter().any(|allowed| allowed == program) => {
+            "Run?".to_string()
         }
-        _ => InlinePlan::Shell,
+        Some([program, ..]) => format!("⚠ '{program}' is not in the allowlist. Run anyway?"),
+        _ => "⚠ Could not parse command. Run anyway?".to_string(),
     }
 }
 
@@ -160,45 +153,18 @@ fn print_inline_preview(command: &str, reason: Option<&str>) -> Result<()> {
 }
 
 /// Confirm and run an inline command. AI-generated commands NEVER run on a bare
-/// Enter — every path requires an explicit `y` (default no). An allow-listed
-/// program name is not a safety guarantee: `git -c alias=…`, `make -f`,
-/// `npm run`, and `cargo build` (build.rs) execute attacker-controlled code with
-/// no shell metacharacter in the command string, so the allow-list only softens
-/// the prompt wording. Allow-listed simple commands run directly via the OS (no
-/// shell); commands using shell features only ever reach `/bin/sh -c`, and only
-/// after the explicit `y`. Returns (executed, exit_code).
+/// Enter: `confirm` defaults to no, so the trailing payload of a command like
+/// `git status; rm -rf ~` cannot run unless the user explicitly types `y` to a
+/// prompt that shows the full command and warns that it uses shell features. The
+/// security boundary is the default-no confirmation plus the full preview — not
+/// the shell vs. direct-exec choice — because a metacharacter-free command can
+/// only ever run a single program through the shell, and an allow-listed program
+/// name does not bound what that program does. Returns (executed, exit_code).
 fn confirm_and_run_inline(command: &str, config: &AppConfig) -> Result<(bool, i32)> {
-    match plan_inline(command, &config.do_config.auto_approve) {
-        InlinePlan::Direct {
-            argv,
-            allowlisted: true,
-        } => {
-            if confirm("Run?")? {
-                Ok((true, run_argv(&argv)?))
-            } else {
-                Ok((false, 0))
-            }
-        }
-        InlinePlan::Direct {
-            argv,
-            allowlisted: false,
-        } => {
-            let prompt = format!("⚠ '{}' is not in the allowlist. Run anyway?", argv[0]);
-            if confirm(&prompt)? {
-                Ok((true, run_argv(&argv)?))
-            } else {
-                Ok((false, 0))
-            }
-        }
-        InlinePlan::Shell => {
-            let prompt = "⚠ Command uses shell features (globs, pipes, redirection, or multiple commands). Run via the shell anyway?";
-            if confirm(prompt)? {
-                Ok((true, run_shell_command(command)?))
-            } else {
-                Ok((false, 0))
-            }
-        }
+    if !confirm(&inline_prompt(command, &config.do_config.auto_approve))? {
+        return Ok((false, 0));
     }
+    Ok((true, run_shell_command(command)?))
 }
 
 /// Prompt for explicit confirmation; always defaults to NO. AI-generated
@@ -213,28 +179,6 @@ fn confirm(label: &str) -> Result<bool> {
         answer.trim().to_ascii_lowercase().as_str(),
         "y" | "yes"
     ))
-}
-
-/// Expand a leading `~` / `~user` in each argv element, matching the shell's
-/// tilde expansion. Direct exec invokes no shell, so without this an allow-listed
-/// `mkdir ~/notes` would create a literal `~` directory in the cwd. Only tilde is
-/// expanded — never `$VAR`, globs, or command substitution — so nothing in the
-/// argument can trigger code execution.
-fn expand_argv(argv: &[String]) -> Vec<String> {
-    argv.iter()
-        .map(|arg| shellexpand::tilde(arg).into_owned())
-        .collect()
-}
-
-/// Run a parsed argv directly via the OS, with no shell, so nothing in the
-/// arguments is interpreted as a shell construct (beyond leading-`~` expansion).
-fn run_argv(argv: &[String]) -> Result<i32> {
-    let argv = expand_argv(argv);
-    let status = Command::new(&argv[0])
-        .args(&argv[1..])
-        .status()
-        .with_context(|| format!("Failed to execute '{}'", argv[0]))?;
-    Ok(status.code().unwrap_or(1))
 }
 
 fn run_shell_command(command: &str) -> Result<i32> {
@@ -294,35 +238,25 @@ mod tests {
     }
 
     #[test]
-    fn clean_allowlisted_command_runs_directly() {
+    fn allowlisted_simple_command_gets_plain_prompt() {
         let allowlist = vec!["cargo".to_string(), "git".to_string()];
-        assert_eq!(
-            plan_inline("cargo test", &allowlist),
-            InlinePlan::Direct {
-                argv: vec!["cargo".into(), "test".into()],
-                allowlisted: true,
-            }
+        assert_eq!(inline_prompt("cargo test", &allowlist), "Run?");
+    }
+
+    #[test]
+    fn non_allowlisted_command_is_flagged() {
+        let allowlist = vec!["cargo".to_string(), "git".to_string()];
+        assert!(
+            inline_prompt("python manage.py test", &allowlist).contains("not in the allowlist")
         );
     }
 
     #[test]
-    fn non_allowlisted_command_is_not_auto_approved() {
-        let allowlist = vec!["cargo".to_string(), "git".to_string()];
-        assert_eq!(
-            plan_inline("python manage.py test", &allowlist),
-            InlinePlan::Direct {
-                argv: vec!["python".into(), "manage.py".into(), "test".into()],
-                allowlisted: false,
-            }
-        );
-    }
-
-    #[test]
-    fn chained_or_piped_command_with_allowlisted_prefix_routes_to_shell() {
+    fn chained_or_piped_command_gets_shell_features_warning() {
         // The core bypass: an allow-listed first token followed by a chained or
-        // piped payload must NOT be treated as an allow-listed direct command.
-        // Routing to Shell forces the explicit default-no confirmation and means
-        // a bare Enter can never run the trailing payload.
+        // piped payload must get the shell-features warning, never the friendly
+        // "Run?" prompt. Combined with the default-no confirmation and the full
+        // command preview, a bare Enter can never run the trailing payload.
         let allowlist = vec!["git".to_string(), "rm".to_string(), "cargo".to_string()];
         for payload in [
             "git status; rm -rf ~",
@@ -333,32 +267,21 @@ mod tests {
             "ls > /etc/passwd",
             "cat `whoami`",
         ] {
-            assert_eq!(
-                plan_inline(payload, &allowlist),
-                InlinePlan::Shell,
-                "payload should require explicit shell confirmation: {payload}"
+            assert!(
+                inline_prompt(payload, &allowlist).contains("shell features"),
+                "payload should get the shell-features warning: {payload}"
             );
         }
     }
 
     #[test]
-    fn run_argv_expands_leading_tilde() {
-        let expanded = expand_argv(&["mkdir".to_string(), "~/notes".to_string()]);
-        assert_eq!(expanded[0], "mkdir");
-        assert!(
-            !expanded[1].starts_with('~'),
-            "leading tilde should be expanded, got {}",
-            expanded[1]
-        );
-        assert!(expanded[1].ends_with("/notes"));
-    }
-
-    #[test]
-    fn glob_command_routes_to_shell_so_it_still_expands() {
-        // Direct exec would pass `*.rs` literally; routing to Shell lets the
-        // shell expand the glob (after the explicit confirmation).
+    fn benign_globs_and_tilde_are_not_flagged_as_shell_features() {
+        // Globs and `~` are ordinary argument expansion the shell performs; they
+        // must NOT trigger the shell-features warning, and they keep working
+        // because confirmed commands run through the shell.
         let allowlist = vec!["ls".to_string()];
-        assert_eq!(plan_inline("ls *.rs", &allowlist), InlinePlan::Shell);
+        assert_eq!(inline_prompt("ls *.rs", &allowlist), "Run?");
+        assert_eq!(inline_prompt("ls ~/Downloads", &allowlist), "Run?");
     }
 
     #[test]
