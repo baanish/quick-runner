@@ -97,12 +97,15 @@ fn parse_classification(raw: &str) -> Result<ParsedClassification> {
     serde_json::from_str(raw).context("Failed to parse AI classification JSON")
 }
 
-/// Characters that signal the model/user intends shell semantics: command
-/// chaining, pipes, redirection, command substitution, or subshells. A command
+/// Characters that require the shell to interpret correctly: command chaining,
+/// pipes, redirection, command substitution, subshells, and globbing. A command
 /// containing any of these is never auto-approved and only ever runs through
-/// `/bin/sh -c` after an explicit `y`, so an allow-listed first token can no
-/// longer smuggle a chained payload (e.g. `git status; rm -rf ~`) past the gate.
-const SHELL_METACHARACTERS: &[char] = &[';', '|', '&', '<', '>', '$', '`', '(', ')', '\n', '\r'];
+/// `/bin/sh -c` after an explicit `y` — so an allow-listed first token can no
+/// longer smuggle a chained payload (e.g. `git status; rm -rf ~`) past the gate,
+/// while benign globs (`ls *.rs`) still expand correctly once the user confirms.
+/// (Leading `~` is handled separately by expand_argv on the direct path.)
+const SHELL_METACHARACTERS: &[char] =
+    &[';', '|', '&', '<', '>', '$', '`', '(', ')', '*', '?', '\n', '\r'];
 
 fn uses_shell_features(command: &str) -> bool {
     command.contains(SHELL_METACHARACTERS)
@@ -188,7 +191,7 @@ fn confirm_and_run_inline(command: &str, config: &AppConfig) -> Result<(bool, i3
             }
         }
         InlinePlan::Shell => {
-            let prompt = "⚠ Command uses shell features (pipes, redirection, or multiple commands). Run via the shell anyway?";
+            let prompt = "⚠ Command uses shell features (globs, pipes, redirection, or multiple commands). Run via the shell anyway?";
             if confirm(prompt)? {
                 Ok((true, run_shell_command(command)?))
             } else {
@@ -212,9 +215,21 @@ fn confirm(label: &str) -> Result<bool> {
     ))
 }
 
+/// Expand a leading `~` / `~user` in each argv element, matching the shell's
+/// tilde expansion. Direct exec invokes no shell, so without this an allow-listed
+/// `mkdir ~/notes` would create a literal `~` directory in the cwd. Only tilde is
+/// expanded — never `$VAR`, globs, or command substitution — so nothing in the
+/// argument can trigger code execution.
+fn expand_argv(argv: &[String]) -> Vec<String> {
+    argv.iter()
+        .map(|arg| shellexpand::tilde(arg).into_owned())
+        .collect()
+}
+
 /// Run a parsed argv directly via the OS, with no shell, so nothing in the
-/// arguments is interpreted as a shell construct.
+/// arguments is interpreted as a shell construct (beyond leading-`~` expansion).
 fn run_argv(argv: &[String]) -> Result<i32> {
+    let argv = expand_argv(argv);
     let status = Command::new(&argv[0])
         .args(&argv[1..])
         .status()
@@ -324,6 +339,26 @@ mod tests {
                 "payload should require explicit shell confirmation: {payload}"
             );
         }
+    }
+
+    #[test]
+    fn run_argv_expands_leading_tilde() {
+        let expanded = expand_argv(&["mkdir".to_string(), "~/notes".to_string()]);
+        assert_eq!(expanded[0], "mkdir");
+        assert!(
+            !expanded[1].starts_with('~'),
+            "leading tilde should be expanded, got {}",
+            expanded[1]
+        );
+        assert!(expanded[1].ends_with("/notes"));
+    }
+
+    #[test]
+    fn glob_command_routes_to_shell_so_it_still_expands() {
+        // Direct exec would pass `*.rs` literally; routing to Shell lets the
+        // shell expand the glob (after the explicit confirmation).
+        let allowlist = vec!["ls".to_string()];
+        assert_eq!(plan_inline("ls *.rs", &allowlist), InlinePlan::Shell);
     }
 
     #[test]
