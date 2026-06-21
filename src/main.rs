@@ -47,6 +47,7 @@ enum Commands {
     Init(InitArgs),
     #[command(alias = "l")]
     Learn,
+    Doctor,
     #[command(alias = "d")]
     Do {
         #[arg(required = true)]
@@ -107,18 +108,41 @@ fn main() -> ExitCode {
 
 fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
+
+    // Config-independent commands must work even when config.toml is missing or
+    // unparseable — they exist to inspect, edit, or repair it. Dispatch them
+    // before AppConfig::load() so a broken config cannot brick its own recovery.
+    match cli.command {
+        Commands::Config(args) => {
+            commands::config_cmd::execute(args)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Doctor => commands::doctor::run().map(|()| ExitCode::SUCCESS),
+        Commands::Learn => {
+            // learn profiles the current project and writes to cwd/.qr; it does
+            // not use qr's config, so it must not fail when config.toml is broken.
+            let result = commands::learn::execute()?;
+            commands::learn::print_summary(&result);
+            Ok(ExitCode::SUCCESS)
+        }
+        command => run_with_config(command),
+    }
+}
+
+fn run_with_config(command: Commands) -> Result<ExitCode> {
     let start = Instant::now();
-    let config = AppConfig::load()?;
+    let config = AppConfig::load()
+        .context("Run `qr doctor` to diagnose, or `qr config` to edit the config file")?;
     config.ensure_parent_dirs()?;
 
     let mut stats = CommandStats {
-        command_type: command_name(&cli.command).to_string(),
+        command_type: command_name(&command).to_string(),
         provider: "no AI".into(),
         ..CommandStats::default()
     };
     let mut interactive_ms: u128 = 0;
 
-    let execution = match cli.command {
+    let execution = match command {
         Commands::Go(args) => {
             let query = args.project.join("-");
             if query.is_empty() {
@@ -129,9 +153,8 @@ fn run() -> Result<ExitCode> {
             print_go_result(&result, args.print_path)?;
             Ok(ExitCode::SUCCESS)
         }
-        Commands::Config(args) => {
-            commands::config_cmd::execute(args)?;
-            Ok(ExitCode::SUCCESS)
+        Commands::Config(_) | Commands::Doctor | Commands::Learn => {
+            unreachable!("config-independent commands are dispatched before config load")
         }
         Commands::Run(args) => {
             let (mode, script) = commands::run::parse_args(&config, &args.parts)?;
@@ -173,11 +196,6 @@ fn run() -> Result<ExitCode> {
         Commands::Init(args) => {
             execute_init(&config, args)?;
             stats.command_type = "__skip_stats__".into();
-            Ok(ExitCode::SUCCESS)
-        }
-        Commands::Learn => {
-            let result = commands::learn::execute()?;
-            commands::learn::print_summary(&result);
             Ok(ExitCode::SUCCESS)
         }
         Commands::Do { task } => {
@@ -537,6 +555,7 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Scan => "scan",
         Commands::Init(_) => "init",
         Commands::Learn => "learn",
+        Commands::Doctor => "doctor",
         Commands::Do { .. } => "do",
     }
 }
