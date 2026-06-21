@@ -16,7 +16,7 @@ use quick_runner::{
         AgentConfig, AiConfig, AppConfig, DoConfig, FallbackAiConfig, GeneralConfig,
         ProjectsConfig, StatsConfig, config_file_path,
     },
-    scanner, shell,
+    scanner, secret, shell,
     stats_db::{CommandStats, StatsDb},
 };
 #[cfg(unix)]
@@ -312,6 +312,8 @@ fn prompt_ai_config(label: &str) -> Result<AiConfig> {
         protocol.default_api_key_env(),
     )?;
 
+    let api_key = maybe_store_key_in_keychain(protocol, &api_key_env, api_key)?;
+
     let fallback = if prompt_bool("Configure a fallback provider?", false)? {
         Some(prompt_fallback_ai_config()?)
     } else {
@@ -326,6 +328,36 @@ fn prompt_ai_config(label: &str) -> Result<AiConfig> {
         api_key_env,
         fallback,
     })
+}
+
+/// Offer to store the API key in the OS keychain instead of the config file.
+/// Returns the value to write into config: empty when the key was stored in the
+/// keychain, otherwise the key itself (config storage is the fallback when the
+/// user declines or the keychain is unavailable).
+fn maybe_store_key_in_keychain(
+    protocol: AiProtocol,
+    api_key_env: &str,
+    api_key: String,
+) -> Result<String> {
+    if !prompt_bool(
+        "Store the API key in your OS keychain (recommended; keeps it out of config.toml)?",
+        true,
+    )? {
+        return Ok(api_key);
+    }
+    let account = secret::account_for(api_key_env, protocol.default_api_key_env());
+    match secret::set(&account, &api_key) {
+        Ok(()) => {
+            println!("✔ stored API key in the OS keychain (account \"{account}\")");
+            Ok(String::new())
+        }
+        Err(error) => {
+            println!(
+                "⚠ could not use the keychain ({error}); storing the key in config.toml instead"
+            );
+            Ok(api_key)
+        }
+    }
 }
 
 fn prompt_fallback_ai_config() -> Result<FallbackAiConfig> {
