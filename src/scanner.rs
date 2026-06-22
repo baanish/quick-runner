@@ -163,9 +163,10 @@ fn git_remote_name(project_dir: &Path) -> Option<String> {
             continue;
         }
         if in_origin && trimmed.starts_with("url = ") {
-            return Some(canonical_name_from_remote(
-                trimmed.trim_start_matches("url = ").trim(),
-            ));
+            let name = canonical_name_from_remote(trimmed.trim_start_matches("url = ").trim());
+            // Fall back (via the caller) to the directory name when the URL
+            // yields an empty name, e.g. a trailing-slash remote.
+            return (!name.is_empty()).then_some(name);
         }
     }
 
@@ -192,6 +193,7 @@ fn git_config_path(project_dir: &Path) -> Option<PathBuf> {
 
 fn canonical_name_from_remote(remote: &str) -> String {
     remote
+        .trim_end_matches('/')
         .rsplit(['/', ':'])
         .next()
         .unwrap_or(remote)
@@ -227,6 +229,42 @@ mod tests {
         let detected = detect_project(&project).unwrap().unwrap();
         assert_eq!(detected.name, "orion-app");
         assert_eq!(detected.source, "git");
+    }
+
+    #[test]
+    fn canonical_name_handles_trailing_slash_and_git_suffix() {
+        assert_eq!(
+            canonical_name_from_remote("https://github.com/org/repo.git/"),
+            "repo"
+        );
+        assert_eq!(
+            canonical_name_from_remote("https://github.com/org/repo.git"),
+            "repo"
+        );
+        assert_eq!(
+            canonical_name_from_remote("git@github.com:org/repo.git"),
+            "repo"
+        );
+        assert_eq!(
+            canonical_name_from_remote("https://github.com/org/repo/"),
+            "repo"
+        );
+    }
+
+    #[test]
+    fn detect_project_falls_back_to_dir_name_for_empty_remote() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("my-proj");
+        fs::create_dir_all(project.join(".git")).unwrap();
+        // A remote that canonicalizes to empty must not produce an empty name.
+        fs::write(
+            project.join(".git/config"),
+            "[remote \"origin\"]\n    url = /\n",
+        )
+        .unwrap();
+
+        let detected = detect_project(&project).unwrap().unwrap();
+        assert_eq!(detected.name, "my-proj");
     }
 
     #[test]
