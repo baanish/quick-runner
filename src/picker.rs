@@ -97,7 +97,10 @@ fn render_page(
         write!(stderr, "{marker} {}) {}\r\n", display_index + 1, value)?;
     }
     if end < options.len() || page > 0 {
-        write!(stderr, "Use arrows to change page. Press 1-9, ESC, or q.\r\n")?;
+        write!(
+            stderr,
+            "Use arrows to change page. Press 1-9, ESC, or q.\r\n"
+        )?;
     } else {
         write!(stderr, "Press 1-9, ESC, or q.\r\n")?;
     }
