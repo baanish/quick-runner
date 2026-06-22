@@ -183,7 +183,7 @@ fn confirm(label: &str) -> Result<bool> {
 
 fn run_shell_command(command: &str) -> Result<i32> {
     let status = Command::new("/bin/sh").arg("-c").arg(command).status()?;
-    Ok(status.code().unwrap_or(1))
+    Ok(super::exit_code(status))
 }
 
 fn build_delegate_suggestions(
