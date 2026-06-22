@@ -167,7 +167,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(resolve_mode(&config, false, true, false).unwrap(), RunMode::Log);
+        assert_eq!(
+            resolve_mode(&config, false, true, false).unwrap(),
+            RunMode::Log
+        );
         assert_eq!(
             resolve_mode(&config, true, false, false).unwrap(),
             RunMode::Watch
