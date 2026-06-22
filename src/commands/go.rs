@@ -74,7 +74,7 @@ pub fn rank_matches(entries: &[ProjectEntry], query: &str) -> Vec<ProjectEntry> 
             } else if entry.path.to_ascii_lowercase().contains(&lower_query) {
                 Some(5_000 - entry.path.len() as i64)
             } else {
-                matcher.fuzzy_match(&entry.name, query)
+                matcher.fuzzy_match(&entry.name, &lower_query)
             }?;
             Some((score, entry))
         })
@@ -176,5 +176,15 @@ mod tests {
         let matches = rank_matches(&sample_projects(), "orion");
         assert_eq!(matches.len(), 2);
         assert!(matches.iter().all(|entry| entry.name.starts_with("orion")));
+    }
+
+    #[test]
+    fn fuzzy_matching_is_case_insensitive() {
+        // A mixed-case query that only matches via the fuzzy tier (not the
+        // substring tiers) must still match — the fuzzy tier previously got the
+        // raw query, making it case-sensitive for uppercase input.
+        let matches = rank_matches(&sample_projects(), "OrionApp");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].name, "orion-app");
     }
 }
