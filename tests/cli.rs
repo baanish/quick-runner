@@ -298,12 +298,9 @@ db_path = "__default__"
     }
 
     let mut cmd = Command::cargo_bin("qr").unwrap();
-    cmd.arg("stats")
-        .assert()
-        .success()
-        .stdout(contains(
-            "ℹ Stats tracking is disabled for non-AI commands. Run qr config to enable.",
-        ));
+    cmd.arg("stats").assert().success().stdout(contains(
+        "ℹ Stats tracking is disabled for non-AI commands. Run qr config to enable.",
+    ));
 
     unsafe {
         std::env::remove_var("QR_CONFIG_DIR");

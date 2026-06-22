@@ -1,3 +1,7 @@
+//! Shared fixtures for the benches. Each bench binary uses only a subset, so the
+//! unused helpers are expected rather than dead code.
+#![allow(dead_code)]
+
 use std::{
     fs,
     path::PathBuf,
