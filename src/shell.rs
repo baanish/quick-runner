@@ -15,8 +15,8 @@ pub enum ShellKind {
 impl ShellKind {
     pub fn alias_line(self, name: &str, command: &str) -> String {
         match self {
-            Self::Zsh | Self::Bash => format!("alias {name}='{command}'"),
-            Self::Fish => format!("alias {name} '{command}'"),
+            Self::Zsh | Self::Bash => format!("alias {name}={}", sh_single_quote(command)),
+            Self::Fish => format!("alias {name} {}", fish_single_quote(command)),
         }
     }
 
@@ -134,8 +134,25 @@ pub fn ensure_wrapper_present(path: &Path, snippet: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// Single-quote a value for a POSIX shell (sh/bash/zsh): wrap in `'…'` and turn
+/// each embedded `'` into `'\''`. Nothing inside can break out, so it is safe to
+/// embed an arbitrary string as a single shell word.
+fn sh_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
+/// Single-quote a value for fish, where only `\` and `'` are special inside `'…'`.
+fn fish_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\\', r"\\").replace('\'', r"\'"))
+}
+
 pub fn cron_line(binary_path: &Path) -> String {
-    format!("0 * * * * {} scan >/dev/null 2>&1", binary_path.display())
+    // Quote the path: cron runs the line through /bin/sh, so a path with spaces
+    // or shell metacharacters would otherwise break the entry or inject.
+    format!(
+        "0 * * * * {} scan >/dev/null 2>&1",
+        sh_single_quote(&binary_path.display().to_string())
+    )
 }
 
 fn parse_alias_line(line: &str) -> Option<(String, String)> {
@@ -211,5 +228,56 @@ mod tests {
     fn fish_alias_lines_are_parsed() {
         let alias = parse_alias_line("alias gs 'git status'").unwrap();
         assert_eq!(alias, ("gs".to_string(), "git status".to_string()));
+    }
+
+    #[test]
+    fn sh_single_quote_is_injection_safe() {
+        // Quoting must let /bin/sh treat any string as a single literal word —
+        // metacharacters and quotes included — so nothing can break out and run.
+        for value in [
+            "plain",
+            "two words",
+            "has 'single' quotes",
+            "back\\slash",
+            "; rm -rf /",
+            "$(whoami)",
+            "tick`s`",
+        ] {
+            let quoted = sh_single_quote(value);
+            let out = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!("printf %s {quoted}"))
+                .output()
+                .unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout),
+                value,
+                "round-trip failed for {value:?} (quoted: {quoted})"
+            );
+        }
+    }
+
+    #[test]
+    fn alias_line_keeps_an_embedded_quote_contained() {
+        // A command containing a quote (and a chained command) must stay inside
+        // the alias quoting rather than injecting into the rc file.
+        let cmd = "echo 'hi' && date";
+        let line = ShellKind::Zsh.alias_line("g", cmd);
+        let quoted = line.strip_prefix("alias g=").unwrap();
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("printf %s {quoted}"))
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), cmd);
+    }
+
+    #[test]
+    fn cron_line_quotes_the_binary_path() {
+        let line = cron_line(Path::new("/opt/my tools/qr"));
+        assert!(
+            line.contains("'/opt/my tools/qr'"),
+            "binary path not quoted: {line}"
+        );
     }
 }
