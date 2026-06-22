@@ -85,7 +85,7 @@ fn run_watch(script: &str) -> Result<RunResult> {
     if output.status.success() {
         println!("✅ exit 0");
     } else {
-        println!("❌ exit {}", output.status.code().unwrap_or(1));
+        println!("❌ exit {}", super::exit_code(output.status));
     }
 
     Ok(result_from_status(output.status, None))
@@ -136,7 +136,7 @@ fn shell_command(script: &str) -> Command {
 
 fn result_from_status(status: ExitStatus, log_path: Option<String>) -> RunResult {
     RunResult {
-        exit_code: status.code().unwrap_or(1),
+        exit_code: super::exit_code(status),
         log_path,
     }
 }
