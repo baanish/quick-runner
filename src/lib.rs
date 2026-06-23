@@ -3,6 +3,7 @@ pub mod atomic;
 pub mod commands;
 pub mod config;
 pub mod picker;
+pub mod pricing;
 pub mod project_profile;
 pub mod scanner;
 pub mod secret;
