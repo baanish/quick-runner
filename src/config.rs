@@ -42,6 +42,10 @@ pub struct AiConfig {
     pub api_key_env: String,
     #[serde(default)]
     pub fallback: Option<FallbackAiConfig>,
+    /// Optional per-million-token price override for cost estimates. When unset,
+    /// the models.dev snapshot is used. Authoritative for custom/proxy endpoints.
+    #[serde(default)]
+    pub cost: Option<crate::pricing::Price>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
