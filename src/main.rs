@@ -14,9 +14,9 @@ use quick_runner::{
     commands::{alias::AliasCommand, config_cmd::ConfigArgs, go::GoResult},
     config::{
         AgentConfig, AiConfig, AppConfig, DoConfig, FallbackAiConfig, GeneralConfig,
-        ProjectsConfig, StatsConfig, config_file_path,
+        ProjectsConfig, StatsConfig, config_dir, config_file_path,
     },
-    scanner, secret, shell,
+    pricing, scanner, secret, shell,
     stats_db::{CommandStats, StatsDb},
 };
 #[cfg(unix)]
@@ -48,6 +48,12 @@ enum Commands {
     #[command(alias = "l")]
     Learn,
     Doctor,
+    /// Show or refresh the AI token prices used for cost estimates
+    Cost {
+        /// Re-fetch the price table from models.dev
+        #[arg(long)]
+        refresh: bool,
+    },
     #[command(alias = "d")]
     Do {
         #[arg(required = true)]
@@ -208,6 +214,11 @@ fn run_with_config(command: Commands) -> Result<ExitCode> {
             stats.command_type = "__skip_stats__".into();
             Ok(ExitCode::SUCCESS)
         }
+        Commands::Cost { refresh } => {
+            run_cost(&config, refresh)?;
+            stats.command_type = "__skip_stats__".into();
+            Ok(ExitCode::SUCCESS)
+        }
         Commands::Do { task } => {
             let client = ai::client::AiClient::new(
                 config.ai_primary_provider(),
@@ -364,7 +375,38 @@ fn prompt_ai_config(label: &str) -> Result<AiConfig> {
         api_key,
         api_key_env,
         fallback,
+        cost: None,
     })
+}
+
+fn run_cost(config: &AppConfig, refresh: bool) -> Result<()> {
+    let dir = config_dir();
+    if refresh {
+        let count = pricing::refresh(&dir)?;
+        println!("✔ saved prices for {count} models from models.dev");
+    }
+    let model = &config.ai.model;
+    let price = config
+        .ai
+        .cost
+        .or_else(|| pricing::load(&dir).and_then(|table| table.get(model)));
+    match price {
+        Some(price) => {
+            let source = if config.ai.cost.is_some() {
+                "config override"
+            } else {
+                "models.dev"
+            };
+            println!(
+                "{model}: ${:.2} per Mtok in, ${:.2} per Mtok out  ({source})",
+                price.input, price.output
+            );
+        }
+        None => println!(
+            "{model}: no price found — run `qr cost --refresh`, or set [ai].cost in config.toml"
+        ),
+    }
+    Ok(())
 }
 
 /// Offer to store the API key in the OS keychain instead of the config file.
@@ -575,6 +617,7 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Init(_) => "init",
         Commands::Learn => "learn",
         Commands::Doctor => "doctor",
+        Commands::Cost { .. } => "cost",
         Commands::Do { .. } => "do",
     }
 }
