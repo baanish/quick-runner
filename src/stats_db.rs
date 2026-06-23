@@ -12,6 +12,9 @@ pub struct CommandStats {
     pub latency_ms: u128,
     pub provider: String,
     pub estimated_cost_usd: f64,
+    /// Whether a price was resolved (vs. unknown). Transient — not persisted; it
+    /// only controls whether the stats line shows a dollar figure or `cost n/a`.
+    pub cost_known: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -151,6 +154,7 @@ mod tests {
             latency_ms: 342,
             provider: "FirePass".into(),
             estimated_cost_usd: 0.001,
+            cost_known: true,
         })
         .unwrap();
 
