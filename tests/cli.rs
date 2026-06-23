@@ -325,6 +325,7 @@ fn init_collects_ai_provider_settings_and_writes_secure_config() {
     cmd.arg("init")
         .arg("--no-shell-wrapper")
         .arg("--no-cron")
+        .arg("--no-prices")
         .write_stdin(format!(
             "{root}\n\nopenai-compatible\n\nopenai-model\nconfig-primary-key\n\n\
 n\ny\nanthropic-compatible\n\nclaude-fallback\nconfig-fallback-key\nFALLBACK_SECRET\n",
@@ -377,6 +378,7 @@ fn init_prompts_before_installing_cron_and_skips_on_no() {
     let mut cmd = Command::cargo_bin("qr").unwrap();
     cmd.arg("init")
         .arg("--no-shell-wrapper")
+        .arg("--no-prices")
         .write_stdin(format!(
             "{root}\n\nopenai-compatible\n\nopenai-model\nprimary-key\n\nn\nn\n",
             root = project_root.display()
@@ -626,6 +628,46 @@ fn run_executes_positional_script_with_mode_flag() {
 
     unsafe {
         std::env::remove_var("QR_CONFIG_DIR");
+    }
+}
+
+#[test]
+fn do_shows_estimated_cost_from_the_price_table() {
+    let _guard = env_lock().lock().unwrap();
+    clear_test_env();
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_dir = tmp.path().join("cfg");
+    fs::create_dir_all(&cfg_dir).unwrap();
+    fs::create_dir_all(tmp.path().join(".qr")).unwrap();
+    let server = spawn_server(
+        200,
+        r#"{"choices":[{"message":{"content":"{\"classification\":\"inline\",\"command\":\"cargo test\"}"}}],"usage":{"prompt_tokens":8,"completion_tokens":6}}"#,
+    );
+    fs::write(cfg_dir.join("config.toml"), do_inline_test_config(&server)).unwrap();
+    // Price the configured model "demo": (8*1000 + 6*2000) / 1e6 = $0.0200.
+    fs::write(
+        cfg_dir.join("prices.json"),
+        r#"{"models":{"demo":{"input":1000.0,"output":2000.0}}}"#,
+    )
+    .unwrap();
+    unsafe {
+        std::env::set_var("QR_CONFIG_DIR", &cfg_dir);
+        std::env::set_var("QR_TEST_AI_KEY", "token");
+    }
+
+    Command::cargo_bin("qr")
+        .unwrap()
+        .current_dir(tmp.path())
+        .arg("do")
+        .arg("run tests")
+        .write_stdin("n\n")
+        .assert()
+        .success()
+        .stderr(contains("~$0.0200"));
+
+    unsafe {
+        std::env::remove_var("QR_CONFIG_DIR");
+        std::env::remove_var("QR_TEST_AI_KEY");
     }
 }
 

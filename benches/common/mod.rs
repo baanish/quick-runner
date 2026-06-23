@@ -124,6 +124,7 @@ pub fn seeded_stats_db(run_count: usize) -> (TempDir, PathBuf) {
             latency_ms: (10 + index) as u128,
             provider: if index % 3 == 0 { "FirePass" } else { "no AI" }.into(),
             estimated_cost_usd: index as f64 / 10_000.0,
+            cost_known: true,
         })
         .unwrap();
     }
