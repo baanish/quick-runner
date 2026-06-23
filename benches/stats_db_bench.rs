@@ -16,6 +16,7 @@ fn stats_db_benchmarks(c: &mut Criterion) {
                 latency_ms: 12,
                 provider: "FirePass".into(),
                 estimated_cost_usd: 0.0005,
+                cost_known: true,
             })
             .unwrap();
         });

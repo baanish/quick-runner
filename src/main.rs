@@ -109,6 +109,9 @@ struct InitArgs {
     no_shell_wrapper: bool,
     #[arg(long)]
     no_cron: bool,
+    /// Skip fetching the models.dev price snapshot used for cost estimates
+    #[arg(long)]
+    no_prices: bool,
 }
 
 fn main() -> ExitCode {
@@ -230,7 +233,17 @@ fn run_with_config(command: Commands) -> Result<ExitCode> {
             stats.input_tokens = result.ai_response.input_tokens;
             stats.output_tokens = result.ai_response.output_tokens;
             stats.provider = result.ai_response.provider_label.clone();
-            stats.estimated_cost_usd = result.ai_response.estimated_cost_usd;
+            // Estimate cost from the configured price override, else the
+            // models.dev snapshot. Unknown stays 0.0 and is shown as `cost n/a`.
+            if let Some(price) = config.ai.cost.or_else(|| {
+                pricing::load(&config_dir()).and_then(|table| table.get(&config.ai.model))
+            }) {
+                stats.estimated_cost_usd = price.cost(
+                    result.ai_response.input_tokens,
+                    result.ai_response.output_tokens,
+                );
+                stats.cost_known = true;
+            }
 
             match result.outcome {
                 commands::do_cmd::DoOutcome::Inline { exit_code, .. } => {
@@ -347,6 +360,17 @@ fn execute_init(config: &AppConfig, args: InitArgs) -> Result<()> {
 
     let cache = scanner::scan_projects(&effective_config)?;
     println!("initial scan found {} projects", cache.projects.len());
+
+    if !args.no_prices {
+        // Best-effort: a network failure here must not block init.
+        match pricing::refresh(&config_dir()) {
+            Ok(count) => println!("fetched prices for {count} models from models.dev"),
+            Err(error) => {
+                println!("⚠ could not fetch model prices ({error}); run `qr cost --refresh` later")
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -590,15 +614,20 @@ fn print_stats_line(stats: &CommandStats, stats_enabled: bool) -> Result<()> {
     }
     let mut stderr = io::stderr().lock();
     if stats.ai_used {
+        let cost = if stats.cost_known {
+            format!("~${:.4}", stats.estimated_cost_usd)
+        } else {
+            "cost n/a".to_string()
+        };
         writeln!(
             stderr,
-            "⚡ {}ms | {} tok (in: {} / out: {}) | {} | ~${:.3}",
+            "⚡ {}ms | {} tok (in: {} / out: {}) | {} | {}",
             stats.latency_ms,
             stats.input_tokens + stats.output_tokens,
             stats.input_tokens,
             stats.output_tokens,
             stats.provider,
-            stats.estimated_cost_usd
+            cost
         )?;
     } else {
         writeln!(stderr, "⚡ {}ms | no AI", stats.latency_ms)?;

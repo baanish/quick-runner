@@ -1,8 +1,8 @@
 //! AI token-price table sourced from [models.dev](https://models.dev).
 //!
-//! The full catalog (~2.3 MB, 144 providers) is fetched via `qr cost --refresh`,
-//! then distilled into a slim local snapshot (`prices.json`) so cost estimation
-//! needs no network at command time.
+//! The full catalog (~2.3 MB, 144 providers) is fetched at `qr init` and via
+//! `qr cost --refresh`, then distilled into a slim local snapshot
+//! (`prices.json`) so cost estimation needs no network at command time.
 //!
 //! Prices are USD per **million** tokens. A model is often carried by many
 //! providers at slightly different prices. To pick one without a hardcoded

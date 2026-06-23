@@ -116,6 +116,7 @@ fn stats_db_round_trip_has_measurable_latency() {
         latency_ms: 8,
         provider: "FirePass".into(),
         estimated_cost_usd: 0.0001,
+        cost_known: true,
     })
     .unwrap();
     let summary = db.summary().unwrap();
