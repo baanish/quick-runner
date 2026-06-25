@@ -64,10 +64,8 @@ pub struct StatsConfig {
     pub db_path: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DoConfig {
-    #[serde(default = "default_auto_approve")]
-    pub auto_approve: Vec<String>,
     #[serde(default)]
     pub agents: AgentConfig,
 }
@@ -189,31 +187,12 @@ pub fn default_config_str() -> &'static str {
     DEFAULT_CONFIG
 }
 
-fn default_auto_approve() -> Vec<String> {
-    [
-        "cargo", "npm", "pnpm", "yarn", "pip", "pytest", "make", "git", "ls", "cat", "grep",
-        "echo", "mkdir", "touch",
-    ]
-    .into_iter()
-    .map(ToOwned::to_owned)
-    .collect()
-}
-
 fn default_codex_agent() -> String {
     "codex exec".into()
 }
 
 fn default_claude_agent() -> String {
     "claude --dangerously-skip-permissions -p".into()
-}
-
-impl Default for DoConfig {
-    fn default() -> Self {
-        Self {
-            auto_approve: default_auto_approve(),
-            agents: AgentConfig::default(),
-        }
-    }
 }
 
 impl Default for AgentConfig {
