@@ -145,8 +145,9 @@ pub fn ensure_wrapper_present(path: &Path, snippet: &str) -> Result<bool> {
 
 /// Single-quote a value for a POSIX shell (sh/bash/zsh): wrap in `'…'` and turn
 /// each embedded `'` into `'\''`. Nothing inside can break out, so it is safe to
-/// embed an arbitrary string as a single shell word.
-fn sh_single_quote(value: &str) -> String {
+/// embed an arbitrary string as a single shell word. Shared across the alias,
+/// cron, and `qr run` log-tee paths.
+pub(crate) fn sh_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 

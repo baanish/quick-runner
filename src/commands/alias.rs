@@ -37,10 +37,7 @@ pub fn execute(command: AliasCommand) -> Result<()> {
             } else {
                 println!("added alias '{name}' to {}", rc_path.display());
             }
-            println!(
-                "Run `source {}` or open a new terminal to reload aliases.",
-                rc_path.display()
-            );
+            print_reload_hint(&rc_path);
         }
         AliasCommand::List => {
             let aliases = load_aliases(&rc_path)?;
@@ -55,10 +52,7 @@ pub fn execute(command: AliasCommand) -> Result<()> {
         AliasCommand::Remove { name } => {
             if remove_alias(&rc_path, &name)? {
                 println!("removed alias '{name}' from {}", rc_path.display());
-                println!(
-                    "Run `source {}` or open a new terminal to reload aliases.",
-                    rc_path.display()
-                );
+                print_reload_hint(&rc_path);
             } else {
                 return Err(anyhow!(
                     "Alias '{name}' was not found in {}",
@@ -69,6 +63,13 @@ pub fn execute(command: AliasCommand) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn print_reload_hint(rc_path: &std::path::Path) {
+    println!(
+        "Run `source {}` or open a new terminal to reload aliases.",
+        rc_path.display()
+    );
 }
 
 pub fn install_wrapper() -> Result<()> {

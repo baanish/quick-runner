@@ -159,7 +159,7 @@ fn build_delegate_suggestions(
     task: &str,
     profile: Option<&ProjectProfile>,
 ) -> Vec<String> {
-    let escaped = shell_quote(task);
+    let escaped = crate::shell::sh_single_quote(task);
     let mut suggestions =
         if profile.and_then(|value| value.prefer_agent.as_deref()) == Some("claude") {
             vec![
@@ -185,10 +185,6 @@ fn print_delegate_suggestions(suggestions: &[String], reason: Option<&str>) -> R
         println!("→ Suggested: {suggestion}");
     }
     Ok(())
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', r#"'\''"#))
 }
 
 #[cfg(test)]
