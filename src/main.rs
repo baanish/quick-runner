@@ -147,6 +147,15 @@ fn run() -> Result<ExitCode> {
     }
 }
 
+/// Map a child process exit code to this process's `ExitCode` (0 → success).
+fn exit_status(code: i32) -> ExitCode {
+    if code == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(code as u8)
+    }
+}
+
 fn run_with_config(command: Commands) -> Result<ExitCode> {
     let start = Instant::now();
     let config = AppConfig::load()
@@ -181,11 +190,7 @@ fn run_with_config(command: Commands) -> Result<ExitCode> {
             if let Some(path) = result.log_path {
                 let _ = path;
             }
-            if result.exit_code == 0 {
-                Ok(ExitCode::SUCCESS)
-            } else {
-                Ok(ExitCode::from(result.exit_code as u8))
-            }
+            Ok(exit_status(result.exit_code))
         }
         Commands::Alias(args) => {
             let alias_command = match args.command {
@@ -246,13 +251,7 @@ fn run_with_config(command: Commands) -> Result<ExitCode> {
             }
 
             match result.outcome {
-                commands::do_cmd::DoOutcome::Inline { exit_code, .. } => {
-                    if exit_code == 0 {
-                        Ok(ExitCode::SUCCESS)
-                    } else {
-                        Ok(ExitCode::from(exit_code as u8))
-                    }
-                }
+                commands::do_cmd::DoOutcome::Inline { exit_code, .. } => Ok(exit_status(exit_code)),
                 commands::do_cmd::DoOutcome::Delegate { .. } => Ok(ExitCode::SUCCESS),
             }
         }
@@ -373,7 +372,8 @@ fn execute_init(config: &AppConfig, args: InitArgs) -> Result<()> {
     Ok(())
 }
 
-fn prompt_ai_config(label: &str) -> Result<AiConfig> {
+/// Prompt for the five fields shared by a primary and a fallback AI provider.
+fn prompt_provider_fields(label: &str) -> Result<(AiProtocol, String, String, String, String)> {
     let protocol = prompt_protocol(label)?;
     let base_url = prompt_with_default(&format!("{label} base URL"), protocol.default_base_url())?;
     let model = prompt_required(&format!("{label} model name"))?;
@@ -382,7 +382,11 @@ fn prompt_ai_config(label: &str) -> Result<AiConfig> {
         &format!("{label} API key env var override"),
         protocol.default_api_key_env(),
     )?;
+    Ok((protocol, base_url, model, api_key, api_key_env))
+}
 
+fn prompt_ai_config(label: &str) -> Result<AiConfig> {
+    let (protocol, base_url, model, api_key, api_key_env) = prompt_provider_fields(label)?;
     let api_key = maybe_store_key_in_keychain(protocol, &api_key_env, api_key)?;
 
     let fallback = if prompt_bool("Configure a fallback provider?", false)? {
@@ -463,15 +467,7 @@ fn maybe_store_key_in_keychain(
 }
 
 fn prompt_fallback_ai_config() -> Result<FallbackAiConfig> {
-    let protocol = prompt_protocol("fallback")?;
-    let base_url = prompt_with_default("fallback base URL", protocol.default_base_url())?;
-    let model = prompt_required("fallback model name")?;
-    let api_key = prompt_required("fallback API key")?;
-    let api_key_env = prompt_with_default(
-        "fallback API key env var override",
-        protocol.default_api_key_env(),
-    )?;
-
+    let (protocol, base_url, model, api_key, api_key_env) = prompt_provider_fields("fallback")?;
     Ok(FallbackAiConfig {
         protocol,
         base_url,

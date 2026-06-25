@@ -223,19 +223,12 @@ fn parse_response(provider: &ProviderConfig, json: &Value) -> Result<AiResponse>
             token_count(json, "/usage/completion_tokens"),
         ),
         AiProtocol::Anthropic => (
-            json.get("content")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|item| {
-                    if item.get("type").and_then(Value::as_str) == Some("text") {
-                        item.get("text").and_then(Value::as_str)
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(""),
+            collect_text_blocks(
+                json.get("content")
+                    .and_then(Value::as_array)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+            ),
             token_count(json, "/usage/input_tokens"),
             token_count(json, "/usage/output_tokens"),
         ),
@@ -258,20 +251,22 @@ fn parse_message_content(value: &Value) -> Option<String> {
     if let Some(text) = value.as_str() {
         return Some(text.to_string());
     }
+    value.as_array().map(|items| collect_text_blocks(items))
+}
 
-    value.as_array().map(|items| {
-        items
-            .iter()
-            .filter_map(|item| {
-                if item.get("type").and_then(Value::as_str) == Some("text") {
-                    item.get("text").and_then(Value::as_str)
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("")
-    })
+/// Concatenate the `text` of every `{"type":"text", …}` block in a content array
+/// (the shape used by Anthropic responses and OpenAI array-form message content).
+fn collect_text_blocks(items: &[Value]) -> String {
+    items
+        .iter()
+        .filter_map(|item| {
+            if item.get("type").and_then(Value::as_str) == Some("text") {
+                item.get("text").and_then(Value::as_str)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn extract_error_message(body: &str) -> String {
