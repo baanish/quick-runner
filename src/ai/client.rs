@@ -186,16 +186,22 @@ fn read_capped(reader: impl std::io::Read, max: u64) -> Result<String> {
     String::from_utf8(buf).context("AI response body was not valid UTF-8")
 }
 
-/// Parse a usage token count, accepting an integer or an integral float and
-/// clamping anything negative or non-numeric to 0. A wrong count only skews the
-/// non-critical cost estimate, so this never errors.
+/// Parse a usage token count, accepting an integer or a finite float and
+/// clamping anything negative or non-numeric to 0. The result is capped at
+/// `i64::MAX` so a huge value (e.g. `1e100`, which saturates the float→u64 cast
+/// to `u64::MAX`) can't later wrap negative when stored as a SQLite i64. A wrong
+/// count only skews the non-critical cost estimate, so this never errors.
 fn token_count(json: &Value, pointer: &str) -> u64 {
     json.pointer(pointer)
         .and_then(|value| {
-            value
-                .as_u64()
-                .or_else(|| value.as_f64().map(|f| f.max(0.0) as u64))
+            value.as_u64().or_else(|| {
+                value
+                    .as_f64()
+                    .filter(|f| f.is_finite())
+                    .map(|f| f.max(0.0) as u64)
+            })
         })
+        .map(|count| count.min(i64::MAX as u64))
         .unwrap_or(0)
 }
 
@@ -518,12 +524,16 @@ mod tests {
 
     #[test]
     fn token_count_accepts_int_float_and_clamps_negative() {
-        let json: Value = serde_json::from_str(r#"{"i":12,"f":34.0,"neg":-5,"str":"x"}"#).unwrap();
+        let json: Value =
+            serde_json::from_str(r#"{"i":12,"f":34.0,"neg":-5,"str":"x","huge":1e100}"#).unwrap();
         assert_eq!(token_count(&json, "/i"), 12);
         assert_eq!(token_count(&json, "/f"), 34);
         assert_eq!(token_count(&json, "/neg"), 0);
         assert_eq!(token_count(&json, "/str"), 0);
         assert_eq!(token_count(&json, "/missing"), 0);
+        // A huge float must clamp to i64::MAX, never u64::MAX (which would wrap
+        // negative when stored as a SQLite i64).
+        assert_eq!(token_count(&json, "/huge"), i64::MAX as u64);
     }
 
     #[test]
