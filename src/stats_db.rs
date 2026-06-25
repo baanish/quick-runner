@@ -68,9 +68,9 @@ impl StatsDb {
             params![
                 stats.command_type,
                 stats.ai_used as i64,
-                stats.input_tokens as i64,
-                stats.output_tokens as i64,
-                stats.latency_ms as i64,
+                saturating_i64(stats.input_tokens as u128),
+                saturating_i64(stats.output_tokens as u128),
+                saturating_i64(stats.latency_ms),
                 stats.provider,
                 stats.estimated_cost_usd
             ],
@@ -131,6 +131,13 @@ impl StatsDb {
     }
 }
 
+/// Clamp a count to SQLite's signed 64-bit range. Token counts and latencies
+/// this large are not physically reachable, but a bare `as i64` would wrap them
+/// to a negative number and silently corrupt later `SUM`/`AVG` aggregates.
+fn saturating_i64(value: u128) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,5 +172,29 @@ mod tests {
         assert_eq!(summary.output_tokens, 400);
         assert_eq!(summary.average_ai_latency_ms, 342);
         assert_eq!(summary.last_provider, "FirePass");
+    }
+
+    #[test]
+    fn huge_counts_saturate_instead_of_wrapping_negative() {
+        // A bare `as i64` turns u64::MAX into -1, which would make summaries
+        // report a nonsensical (and via `as u64`, enormous) token total. Clamping
+        // keeps the stored value non-negative.
+        let db = StatsDb::open_in_memory().unwrap();
+        db.record(&CommandStats {
+            command_type: "do".into(),
+            ai_used: true,
+            input_tokens: u64::MAX,
+            output_tokens: u64::MAX,
+            latency_ms: u128::MAX,
+            provider: "x".into(),
+            estimated_cost_usd: 0.0,
+            cost_known: true,
+        })
+        .unwrap();
+
+        let summary = db.summary().unwrap();
+        assert_eq!(summary.total_runs, 1);
+        assert_eq!(summary.input_tokens, i64::MAX as u64);
+        assert_eq!(summary.output_tokens, i64::MAX as u64);
     }
 }
