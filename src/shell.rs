@@ -61,6 +61,15 @@ pub fn add_or_update_alias(
     name: &str,
     command: &str,
 ) -> Result<bool> {
+    // The alias *value* is shell-quoted, but the *name* is emitted verbatim and
+    // the line is stored in a line-oriented rc file. Reject names that aren't a
+    // plain identifier (otherwise `qr alias add 'x; reboot #' …` would write an
+    // rc line that runs `reboot` on the next shell start) and commands that span
+    // lines (a newline would split one alias across physical rc lines, which
+    // `remove_alias` then can't cleanly remove).
+    validate_alias_name(name)?;
+    validate_alias_command(command)?;
+
     let mut lines = read_lines(path)?;
     let alias_line = shell.alias_line(name, command);
     let mut replaced = false;
@@ -155,28 +164,83 @@ pub fn cron_line(binary_path: &Path) -> String {
     )
 }
 
+fn validate_alias_name(name: &str) -> Result<()> {
+    let mut chars = name.chars();
+    let valid = match chars.next() {
+        Some(first) if first.is_ascii_alphanumeric() || first == '_' => {
+            chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        }
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "Invalid alias name '{name}': use letters, digits, '_', '-' or '.', starting with a letter, digit, or '_'"
+        ))
+    }
+}
+
+fn validate_alias_command(command: &str) -> Result<()> {
+    if command.contains(['\n', '\r', '\0']) {
+        Err(anyhow!(
+            "Alias command must be a single line (no newline or NUL characters)"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn parse_alias_line(line: &str) -> Option<(String, String)> {
     let trimmed = line.trim();
     let body = trimmed.strip_prefix("alias ")?;
+
+    // POSIX form `alias name=<value>`, but only when `=` precedes any whitespace.
+    // Otherwise the `=` belongs to the command (e.g. fish's `alias e 'echo a=b'`)
+    // and must not be mistaken for the name/value separator.
     if let Some(split_index) = body.find('=') {
-        let name = body[..split_index].trim().trim_matches('\'').to_string();
-        let command = body[split_index + 1..]
-            .trim()
-            .trim_matches('\'')
-            .trim_matches('"')
-            .to_string();
-        return Some((name, command));
+        if !body[..split_index].contains(char::is_whitespace) {
+            let name = body[..split_index].trim().to_string();
+            let command = decode_posix_value(body[split_index + 1..].trim());
+            return Some((name, command));
+        }
     }
 
+    // fish form: `alias name command`.
     let mut parts = body.splitn(2, ' ');
-    let name = parts.next()?.trim().trim_matches('\'').to_string();
-    let command = parts
-        .next()?
-        .trim()
-        .trim_matches('\'')
-        .trim_matches('"')
-        .to_string();
+    let name = parts.next()?.trim().to_string();
+    let command = decode_fish_value(parts.next()?.trim());
     Some((name, command))
+}
+
+/// Decode a POSIX-shell single-quoted value back to the original command. Our
+/// serializer (`sh_single_quote`) always emits one valid shell word, so shlex
+/// inverts it exactly; hand-edited lines that aren't valid shell words fall back
+/// to a best-effort quote trim.
+fn decode_posix_value(value: &str) -> String {
+    match shlex::split(value) {
+        Some(tokens) if !tokens.is_empty() => tokens.join(" "),
+        _ => value.trim_matches('\'').trim_matches('"').to_string(),
+    }
+}
+
+/// Decode a fish single-quoted value, reversing `fish_single_quote` (`\\` -> `\`,
+/// `\'` -> `'`). Unquoted values pass through unchanged.
+fn decode_fish_value(value: &str) -> String {
+    let inner = value
+        .strip_prefix('\'')
+        .and_then(|rest| rest.strip_suffix('\''))
+        .unwrap_or(value);
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' && matches!(chars.peek(), Some('\\') | Some('\'')) {
+            out.push(chars.next().unwrap());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn read_lines(path: &Path) -> Result<Vec<String>> {
@@ -279,5 +343,55 @@ mod tests {
             line.contains("'/opt/my tools/qr'"),
             "binary path not quoted: {line}"
         );
+    }
+
+    #[test]
+    fn alias_command_with_single_quotes_round_trips() {
+        // Writing then loading an alias whose command contains single quotes must
+        // return the command verbatim, not a quote-stripped corruption.
+        let tmp = tempfile::tempdir().unwrap();
+        let rc = tmp.path().join(".zshrc");
+        for command in ["echo 'hi'", "'", "git commit -m 'wip'", "a'b'c"] {
+            add_or_update_alias(&rc, ShellKind::Zsh, "g", command).unwrap();
+            let aliases = load_aliases(&rc).unwrap();
+            let loaded = aliases.iter().find(|(n, _)| n == "g").map(|(_, c)| c);
+            assert_eq!(
+                loaded.map(String::as_str),
+                Some(command),
+                "round-trip lost data for {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn alias_name_with_shell_metacharacters_is_rejected() {
+        // A name carrying a chained command must be refused before it can be
+        // written raw into the rc file and executed on the next shell start.
+        let tmp = tempfile::tempdir().unwrap();
+        let rc = tmp.path().join(".zshrc");
+        let result = add_or_update_alias(&rc, ShellKind::Zsh, "x; touch pwn #", "echo ok");
+        assert!(
+            result.is_err(),
+            "injection-shaped alias name must be rejected"
+        );
+        assert!(!rc.exists(), "rejected alias must not write the rc file");
+    }
+
+    #[test]
+    fn alias_command_with_newline_is_rejected() {
+        // A newline would split one alias across physical rc lines, leaving an
+        // orphan line that `remove_alias` cannot cleanly remove.
+        let tmp = tempfile::tempdir().unwrap();
+        let rc = tmp.path().join(".zshrc");
+        let result = add_or_update_alias(&rc, ShellKind::Zsh, "n", "echo\ntouch pwn #");
+        assert!(result.is_err(), "multi-line alias command must be rejected");
+    }
+
+    #[test]
+    fn fish_alias_with_equals_in_command_parses() {
+        // The `=` inside the command must not be mistaken for the POSIX
+        // name/value separator.
+        let parsed = parse_alias_line("alias e 'echo a=b'").unwrap();
+        assert_eq!(parsed, ("e".to_string(), "echo a=b".to_string()));
     }
 }
