@@ -293,14 +293,8 @@ fn parse_bool(raw: &str) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Mutex, OnceLock};
-
     use super::*;
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
+    use crate::test_env_lock;
 
     fn clear_test_env() {
         for key in [
@@ -336,7 +330,7 @@ mod tests {
 
     #[test]
     fn config_uses_defaults_when_file_missing() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = test_env_lock().lock().unwrap();
         clear_test_env();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -350,7 +344,7 @@ mod tests {
 
     #[test]
     fn env_vars_override_config_values() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = test_env_lock().lock().unwrap();
         clear_test_env();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -426,7 +420,7 @@ db_path = "/tmp/file.db"
 
     #[test]
     fn config_parses_when_ai_fallback_section_is_missing() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = test_env_lock().lock().unwrap();
         clear_test_env();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
