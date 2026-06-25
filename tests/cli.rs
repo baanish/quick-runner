@@ -139,31 +139,7 @@ fn do_routes_inline_tasks_with_preview() {
         r#"{"choices":[{"message":{"content":"{\"classification\":\"inline\",\"command\":\"cargo test\"}"}}],"usage":{"prompt_tokens":8,"completion_tokens":6}}"#,
     );
 
-    fs::write(
-        cfg_dir.join("config.toml"),
-        format!(
-            r#"[general]
-default_run_mode = "output"
-
-[projects]
-roots = ["~/Development"]
-scan_depth = 2
-scan_interval_hours = 1
-
-[ai]
-protocol = "openai"
-base_url = "{server}"
-model = "demo"
-api_key = ""
-api_key_env = "QR_TEST_AI_KEY"
-
-[stats]
-enabled = false
-db_path = "__default__"
-"#
-        ),
-    )
-    .unwrap();
+    fs::write(cfg_dir.join("config.toml"), do_inline_test_config(&server)).unwrap();
     fs::write(
         tmp.path().join(".qr/profile.json"),
         r#"{"name":"demo-rs","language":"rust","framework":null,"package_manager":"cargo","test_command":"cargo test","build_command":"cargo build","lint_command":"cargo clippy","scripts":{"test":"cargo test"},"prefer_agent":null,"entry_points":["src/main.rs"]}"#,
@@ -204,31 +180,7 @@ fn do_records_ai_run_when_stats_disabled() {
         r#"{"choices":[{"message":{"content":"{\"classification\":\"inline\",\"command\":\"cargo test\"}"}}],"usage":{"prompt_tokens":8,"completion_tokens":6}}"#,
     );
 
-    fs::write(
-        cfg_dir.join("config.toml"),
-        format!(
-            r#"[general]
-default_run_mode = "output"
-
-[projects]
-roots = ["~/Development"]
-scan_depth = 2
-scan_interval_hours = 1
-
-[ai]
-protocol = "openai"
-base_url = "{server}"
-model = "demo"
-api_key = ""
-api_key_env = "QR_TEST_AI_KEY"
-
-[stats]
-enabled = false
-db_path = "__default__"
-"#
-        ),
-    )
-    .unwrap();
+    fs::write(cfg_dir.join("config.toml"), do_inline_test_config(&server)).unwrap();
     fs::write(
         tmp.path().join(".qr/profile.json"),
         r#"{"name":"demo-rs","language":"rust","framework":null,"package_manager":"cargo","test_command":"cargo test","build_command":"cargo build","lint_command":"cargo clippy","scripts":{"test":"cargo test"},"prefer_agent":null,"entry_points":["src/main.rs"]}"#,
