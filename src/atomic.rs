@@ -12,6 +12,7 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use anyhow::{Context, Result};
@@ -73,14 +74,18 @@ fn resolve_symlink(path: &Path) -> PathBuf {
 }
 
 /// A temp path in the same directory as `path` (so `rename` stays on one
-/// filesystem and is atomic), made unique by PID to avoid collisions between
-/// concurrent writers.
+/// filesystem and is atomic), made unique by PID *and* a per-process atomic
+/// counter. The counter matters because two threads writing the same target
+/// (e.g. the test suite, or any future concurrent caller) would otherwise share
+/// `<name>.tmp.<pid>` and clobber each other's temp file mid-write.
 fn temp_path(path: &Path) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut name = path
         .file_name()
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| OsString::from("qr-tmp"));
-    name.push(format!(".tmp.{}", std::process::id()));
+    name.push(format!(".tmp.{}.{unique}", std::process::id()));
     path.with_file_name(name)
 }
 
@@ -122,6 +127,46 @@ mod tests {
 
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "atomic replace must preserve the file mode");
+    }
+
+    #[test]
+    fn concurrent_writes_to_same_path_never_interleave() {
+        // Two threads writing the same target must each use a private temp file,
+        // so the destination is always one writer's complete buffer — never a
+        // mix of both, and never a leftover temp.
+        use std::thread;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.bin");
+        let buffers: Vec<Vec<u8>> = (0..6u8).map(|i| vec![b'a' + i; 8192]).collect();
+
+        let handles: Vec<_> = buffers
+            .iter()
+            .map(|buf| {
+                let buf = buf.clone();
+                let path = path.clone();
+                thread::spawn(move || {
+                    for _ in 0..25 {
+                        write(&path, &buf).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let final_bytes = fs::read(&path).unwrap();
+        assert!(
+            buffers.contains(&final_bytes),
+            "destination is not any single writer's complete buffer"
+        );
+        let temps: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(temps.is_empty(), "left temp files behind: {temps:?}");
     }
 
     #[cfg(unix)]
