@@ -219,15 +219,9 @@ fn canonical_name_from_remote(remote: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Mutex, OnceLock};
-
     use super::*;
     use crate::config::AppConfig;
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
+    use crate::test_env_lock;
 
     #[test]
     fn scanner_uses_git_remote_name_when_available() {
@@ -334,7 +328,7 @@ mod tests {
 
     #[test]
     fn scan_projects_writes_cache_file() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = test_env_lock().lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("dev");
         let cfg_dir = tmp.path().join("cfg");
@@ -361,7 +355,7 @@ mod tests {
 
     #[test]
     fn scan_projects_skips_dot_directories_with_project_markers() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = test_env_lock().lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("dev");
         let cfg_dir = tmp.path().join("cfg");
@@ -406,7 +400,7 @@ mod tests {
 
     #[test]
     fn load_or_scan_recovers_from_corrupt_cache() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = test_env_lock().lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("dev");
         let cfg_dir = tmp.path().join("cfg");

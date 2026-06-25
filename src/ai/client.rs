@@ -307,17 +307,12 @@ mod tests {
     use std::{
         io::{Read, Write},
         net::TcpListener,
-        sync::{Mutex, OnceLock},
         thread,
     };
 
     use super::*;
     use crate::ai::providers::AiProtocol;
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
+    use crate::test_env_lock;
 
     fn clear_test_env() {
         for key in [
@@ -335,7 +330,7 @@ mod tests {
 
     #[test]
     fn openai_client_parses_text_response() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = test_env_lock().lock().unwrap();
         clear_test_env();
         let server = spawn_server(
             200,
@@ -370,7 +365,7 @@ mod tests {
 
     #[test]
     fn anthropic_client_parses_text_response() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = test_env_lock().lock().unwrap();
         clear_test_env();
         let server = spawn_server(
             200,
@@ -405,7 +400,7 @@ mod tests {
 
     #[test]
     fn rate_limit_errors_are_reported_cleanly() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = test_env_lock().lock().unwrap();
         clear_test_env();
         let server = spawn_server(429, r#"{"error":{"message":"slow down"}}"#);
         unsafe {
@@ -435,7 +430,7 @@ mod tests {
 
     #[test]
     fn custom_env_var_overrides_well_known_and_config_key() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = test_env_lock().lock().unwrap();
         clear_test_env();
         unsafe {
             std::env::set_var("CUSTOM_QR_TEST_AI_KEY", "custom-token");
@@ -460,7 +455,7 @@ mod tests {
 
     #[test]
     fn well_known_env_var_is_used_when_custom_env_var_is_missing() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = test_env_lock().lock().unwrap();
         clear_test_env();
         unsafe {
             std::env::remove_var("CUSTOM_QR_TEST_ANTHROPIC_KEY");
@@ -484,7 +479,7 @@ mod tests {
 
     #[test]
     fn config_key_is_used_when_no_env_vars_are_available() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = test_env_lock().lock().unwrap();
         clear_test_env();
         unsafe {
             std::env::remove_var("CUSTOM_QR_TEST_AI_KEY");
