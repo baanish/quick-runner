@@ -62,12 +62,32 @@ pub fn write(path: &Path, contents: &[u8]) -> Result<()> {
 }
 
 /// Resolve a final symlink to its real target so an atomic replacement writes
-/// through the link (matching `fs::write`) instead of clobbering it. Non-symlinks
-/// and dangling symlinks are returned unchanged.
+/// through the link (matching `fs::write`) instead of clobbering it — including a
+/// dangling symlink, whose not-yet-existing target is created rather than the
+/// link being replaced by a regular file (a dotfiles-managed rc symlink survives
+/// even if its target is temporarily missing).
+///
+/// Deliberately NOT handled, because neither is reachable for the single-user
+/// rc/config files qr writes: a symlink *loop* (resolves to one link, which is
+/// then replaced) and a target *swapped in after this check* (TOCTOU) — the
+/// latter also can't be closed without an `O_NOFOLLOW` open/rename dance.
 fn resolve_symlink(path: &Path) -> PathBuf {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
-            fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+            // Live symlink: canonicalize resolves the whole chain to the target.
+            if let Ok(real) = fs::canonicalize(path) {
+                return real;
+            }
+            // Dangling symlink: canonicalize fails because the target is missing,
+            // so resolve one level via read_link and write through to it.
+            match fs::read_link(path) {
+                Ok(target) if target.is_absolute() => target,
+                Ok(target) => path
+                    .parent()
+                    .map(|parent| parent.join(target))
+                    .unwrap_or_else(|| path.to_path_buf()),
+                Err(_) => path.to_path_buf(),
+            }
         }
         _ => path.to_path_buf(),
     }
@@ -193,5 +213,32 @@ mod tests {
         );
         assert_eq!(fs::read(&real).unwrap(), b"v2");
         assert_eq!(fs::read(&link).unwrap(), b"v2");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_through_a_dangling_symlink_creates_the_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("missing_target");
+        let link = dir.path().join("link_rc");
+        // A dangling symlink: the target does not exist yet (e.g. a dotfiles
+        // symlink whose repo file is temporarily missing).
+        symlink(&target, &link).unwrap();
+
+        write(&link, b"v1").unwrap();
+
+        // The link must survive (not be replaced by a regular file) and the write
+        // must create and land on its target — matching `fs::write`.
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "dangling symlink was clobbered by a regular file"
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"v1");
+        assert_eq!(fs::read(&link).unwrap(), b"v1");
     }
 }
