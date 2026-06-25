@@ -200,7 +200,9 @@ fn parse_alias_line(line: &str) -> Option<(String, String)> {
     // and must not be mistaken for the name/value separator.
     if let Some(split_index) = body.find('=') {
         if !body[..split_index].contains(char::is_whitespace) {
-            let name = body[..split_index].trim().to_string();
+            // Trim quotes so a pre-existing `alias 'gs'='git status'` still
+            // matches the bare name `gs` for list/remove/update.
+            let name = body[..split_index].trim().trim_matches('\'').to_string();
             let command = decode_posix_value(body[split_index + 1..].trim());
             return Some((name, command));
         }
@@ -208,7 +210,7 @@ fn parse_alias_line(line: &str) -> Option<(String, String)> {
 
     // fish form: `alias name command`.
     let mut parts = body.splitn(2, ' ');
-    let name = parts.next()?.trim().to_string();
+    let name = parts.next()?.trim().trim_matches('\'').to_string();
     let command = decode_fish_value(parts.next()?.trim());
     Some((name, command))
 }
@@ -385,6 +387,14 @@ mod tests {
         let rc = tmp.path().join(".zshrc");
         let result = add_or_update_alias(&rc, ShellKind::Zsh, "n", "echo\ntouch pwn #");
         assert!(result.is_err(), "multi-line alias command must be rejected");
+    }
+
+    #[test]
+    fn quoted_alias_name_is_normalized_on_parse() {
+        // A pre-existing rc line with a quoted name must still resolve to the
+        // bare name so list/remove/update keep matching it.
+        let parsed = parse_alias_line("alias 'gs'='git status'").unwrap();
+        assert_eq!(parsed, ("gs".to_string(), "git status".to_string()));
     }
 
     #[test]
