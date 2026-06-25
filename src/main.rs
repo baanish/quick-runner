@@ -325,7 +325,6 @@ fn execute_init(config: &AppConfig, args: InitArgs) -> Result<()> {
                 db_path: "__default__".into(),
             },
             do_config: DoConfig {
-                auto_approve: DoConfig::default().auto_approve,
                 agents: AgentConfig::default(),
             },
         })?;

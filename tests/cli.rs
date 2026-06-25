@@ -183,7 +183,7 @@ db_path = "__default__"
         .assert()
         .success()
         .stdout(contains("cargo test"))
-        .stdout(contains("Run?"));
+        .stdout(contains("Run this command?"));
 
     unsafe {
         std::env::remove_var("QR_CONFIG_DIR");
