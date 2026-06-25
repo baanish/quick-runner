@@ -24,24 +24,6 @@ api_key_env = "OPENAI_API_KEY"
 enabled = false
 db_path = "__default__"
 
-[do]
-auto_approve = [
-  "cargo",
-  "npm",
-  "pnpm",
-  "yarn",
-  "pip",
-  "pytest",
-  "make",
-  "git",
-  "ls",
-  "cat",
-  "grep",
-  "echo",
-  "mkdir",
-  "touch",
-]
-
 [do.agents]
 codex = "codex exec"
 claude = "claude --dangerously-skip-permissions -p"

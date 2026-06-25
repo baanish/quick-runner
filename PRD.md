@@ -213,37 +213,24 @@ Natural language → action router. Classifies intent, generates a command or de
 - Inline tasks get a generated command; delegate tasks get a suggested agent invocation with the task as the prompt
 - Classification should be fast — single inference call with a small system prompt
 
-**Command allowlist (strict, default-deny):**
+**Confirmation (single prompt, default-No):**
 
-Only allowlisted command families can auto-execute. Everything else requires explicit `y/n` approval.
-
-```toml
-[do]
-# Commands that can execute after a single y/n confirmation
-# Everything NOT on this list gets blocked with "not in allowlist, add it?"
-auto_approve = [
-  "cargo test", "cargo build", "cargo clippy", "cargo fmt",
-  "npm test", "npm run", "yarn test", "yarn run",
-  "go test", "go build", "go vet",
-  "pytest", "python -m pytest",
-  "make", "just",
-  "git status", "git log", "git diff", "git branch",
-  "grep", "rg", "fd", "find",
-  "cat", "head", "tail", "wc", "ls",
-]
-```
+There is no command allowlist. Every inline command is shown in full and runs only
+after one explicit `y` to a prompt that defaults to No. A single, consistent prompt
+— rather than tiered "trusted vs. risky" wording — is the boundary, because an
+allow-listed program name doesn't bound what that program actually does.
 
 **Approval flow:**
 ```
 $ qr do "run tests"
 → cargo test
-Run? [Y/n] y
+Run this command? [y/N] y
 ... (output streams)
 ⚡ 2.1s | 340 tok | FirePass | ~$0.0004
 
 $ qr do "delete all log files"
 → find . -name "*.log" -delete
-⚠ Command not in allowlist. Run anyway? [y/N] _
+Run this command? [y/N] _
 
 $ qr do "refactor the auth module to use JWT tokens"
 🧠 This looks like a multi-step coding task.
