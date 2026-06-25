@@ -158,15 +158,20 @@ fn git_remote_name(project_dir: &Path) -> Option<String> {
 
     for line in raw.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("[remote ") {
+        if trimmed.starts_with('[') {
+            // Any new section header ends the previous one, so only a `url` that
+            // actually sits under `[remote "origin"]` is attributed to origin —
+            // not one in a later non-origin section after an empty origin block.
             in_origin = trimmed == r#"[remote "origin"]"#;
             continue;
         }
-        if in_origin && trimmed.starts_with("url = ") {
-            let name = canonical_name_from_remote(trimmed.trim_start_matches("url = ").trim());
-            // Fall back (via the caller) to the directory name when the URL
-            // yields an empty name, e.g. a trailing-slash remote.
-            return (!name.is_empty()).then_some(name);
+        if in_origin {
+            if let Some(url) = git_url_value(trimmed) {
+                let name = canonical_name_from_remote(url);
+                // Fall back (via the caller) to the directory name when the URL
+                // yields an empty name, e.g. a trailing-slash remote.
+                return (!name.is_empty()).then_some(name);
+            }
         }
     }
 
@@ -191,7 +196,18 @@ fn git_config_path(project_dir: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Extract the value of a `url` key from a trimmed git-config line, accepting
+/// both `url = <value>` and `url=<value>` (git writes the spaced form, but
+/// hand-edited or tool-written configs may omit the spaces).
+fn git_url_value(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("url")?.trim_start();
+    Some(rest.strip_prefix('=')?.trim())
+}
+
 fn canonical_name_from_remote(remote: &str) -> String {
+    // Drop any query/fragment suffix (e.g. `repo.git?token=…`) before isolating
+    // the final path segment and stripping a trailing `.git`.
+    let remote = remote.split(['?', '#']).next().unwrap_or(remote);
     remote
         .trim_end_matches('/')
         .rsplit(['/', ':'])
@@ -249,6 +265,26 @@ mod tests {
             canonical_name_from_remote("https://github.com/org/repo/"),
             "repo"
         );
+        assert_eq!(
+            canonical_name_from_remote("https://github.com/org/repo.git?token=x"),
+            "repo"
+        );
+    }
+
+    #[test]
+    fn git_remote_url_without_spaces_is_parsed() {
+        // git writes `url = …`, but configs that use `url=…` must still resolve.
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("workspace");
+        fs::create_dir_all(project.join(".git")).unwrap();
+        fs::write(
+            project.join(".git/config"),
+            "[remote \"origin\"]\n    url=git@github.com:org/repo.git\n",
+        )
+        .unwrap();
+
+        let detected = detect_project(&project).unwrap().unwrap();
+        assert_eq!(detected.name, "repo");
     }
 
     #[test]
@@ -265,6 +301,23 @@ mod tests {
 
         let detected = detect_project(&project).unwrap().unwrap();
         assert_eq!(detected.name, "my-proj");
+    }
+
+    #[test]
+    fn url_in_a_non_origin_section_is_not_attributed_to_origin() {
+        // An empty origin block followed by a url in another section must not be
+        // mistaken for origin's remote.
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("real-name");
+        fs::create_dir_all(project.join(".git")).unwrap();
+        fs::write(
+            project.join(".git/config"),
+            "[remote \"origin\"]\n[other]\n    url = git@github.com:evil/wrong.git\n",
+        )
+        .unwrap();
+
+        let detected = detect_project(&project).unwrap().unwrap();
+        assert_eq!(detected.name, "real-name");
     }
 
     #[test]
