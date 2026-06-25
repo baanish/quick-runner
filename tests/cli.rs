@@ -360,6 +360,32 @@ n\ny\nanthropic-compatible\n\nclaude-fallback\nconfig-fallback-key\nFALLBACK_SEC
 }
 
 #[test]
+fn init_fails_fast_on_closed_stdin_instead_of_hanging() {
+    let _guard = env_lock().lock().unwrap();
+    clear_test_env();
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_dir = tmp.path().join("cfg");
+    fs::create_dir_all(&cfg_dir).unwrap();
+    unsafe {
+        std::env::set_var("QR_CONFIG_DIR", &cfg_dir);
+    }
+
+    // A closed/empty stdin must surface a clear error, not spin the required-field
+    // prompt loop forever on a perpetually-empty read.
+    Command::cargo_bin("qr")
+        .unwrap()
+        .args(["init", "--no-shell-wrapper", "--no-cron", "--no-prices"])
+        .write_stdin("")
+        .assert()
+        .failure()
+        .stderr(contains("end of input"));
+
+    unsafe {
+        std::env::remove_var("QR_CONFIG_DIR");
+    }
+}
+
+#[test]
 fn init_prompts_before_installing_cron_and_skips_on_no() {
     let _guard = env_lock().lock().unwrap();
     clear_test_env();

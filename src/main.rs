@@ -507,16 +507,21 @@ fn normalize_protocol_input(raw: &str) -> Result<AiProtocol> {
 
 fn prompt_required(label: &str) -> Result<String> {
     loop {
-        let value = prompt(label)?;
-        if !value.trim().is_empty() {
-            return Ok(value);
+        match prompt(label)? {
+            Some(value) if !value.trim().is_empty() => return Ok(value),
+            // A closed/empty stdin can never satisfy a required field, so error
+            // out instead of spinning the retry loop forever on an empty read.
+            None => {
+                anyhow::bail!("Unexpected end of input while reading '{label}' (is stdin closed?)")
+            }
+            Some(_) => println!("{label} is required."),
         }
-        println!("{label} is required.");
     }
 }
 
 fn prompt_with_default(label: &str, default: &str) -> Result<String> {
-    let value = prompt(&format!("{label} [{default}]"))?;
+    // A blank line or EOF both fall back to the default.
+    let value = prompt(&format!("{label} [{default}]"))?.unwrap_or_default();
     if value.trim().is_empty() {
         Ok(default.to_string())
     } else {
@@ -528,9 +533,9 @@ fn prompt_bool(label: &str, default: bool) -> Result<bool> {
     let default_label = if default { "y" } else { "n" };
 
     loop {
-        let value = prompt(&format!("{label} (y/n) [{default_label}]"))?;
-        let trimmed = value.trim().to_ascii_lowercase();
-        match trimmed.as_str() {
+        // A blank line or EOF both accept the default.
+        let value = prompt(&format!("{label} (y/n) [{default_label}]"))?.unwrap_or_default();
+        match value.trim().to_ascii_lowercase().as_str() {
             "" => return Ok(default),
             "y" | "yes" => return Ok(true),
             "n" | "no" => return Ok(false),
@@ -539,12 +544,18 @@ fn prompt_bool(label: &str, default: bool) -> Result<bool> {
     }
 }
 
-fn prompt(label: &str) -> Result<String> {
+/// Read one line from stdin. Returns `None` on EOF (a closed/empty stdin) so
+/// callers can distinguish "the user pressed Enter" (Some("")) from "there is no
+/// more input" — the latter must stop required-field retry loops rather than
+/// letting them spin forever.
+fn prompt(label: &str) -> Result<Option<String>> {
     print!("{label}: ");
     io::stdout().flush()?;
     let mut line = String::new();
-    io::stdin().read_line(&mut line)?;
-    Ok(line.trim().to_string())
+    if io::stdin().read_line(&mut line)? == 0 {
+        return Ok(None);
+    }
+    Ok(Some(line.trim().to_string()))
 }
 
 fn restrict_config_permissions(path: &std::path::Path) -> Result<()> {
