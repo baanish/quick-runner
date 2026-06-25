@@ -6,6 +6,11 @@ use serde_json::{Value, json};
 
 use crate::ai::providers::{AiProtocol, ProviderConfig};
 
+/// Cap on the AI HTTP response body. Classification replies are a few KB at most
+/// (`max_tokens` is 1024), so 8 MiB is generous while still bounding memory
+/// against a malicious or buggy provider streaming an unbounded body.
+const MAX_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct AiClient {
     http: Client,
@@ -103,7 +108,7 @@ impl AiClient {
 
         let response = request.send().context("Failed to reach AI provider")?;
         let status = response.status();
-        let body = response.text().context("Failed to read AI response body")?;
+        let body = read_capped(response, MAX_RESPONSE_BYTES)?;
 
         if status == StatusCode::TOO_MANY_REQUESTS {
             return Err(anyhow!("AI provider rate limited the request"));
@@ -165,6 +170,35 @@ fn resolve_api_key(provider: &ProviderConfig) -> Result<String> {
     ))
 }
 
+/// Read an HTTP body into a `String`, buffering at most `max` bytes so a
+/// malicious or buggy provider can't exhaust memory with an unbounded response.
+fn read_capped(reader: impl std::io::Read, max: u64) -> Result<String> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    // Read one extra byte so "exactly at the cap" is distinguishable from "over".
+    reader
+        .take(max + 1)
+        .read_to_end(&mut buf)
+        .context("Failed to read AI response body")?;
+    if buf.len() as u64 > max {
+        anyhow::bail!("AI provider response exceeded the {max}-byte limit");
+    }
+    String::from_utf8(buf).context("AI response body was not valid UTF-8")
+}
+
+/// Parse a usage token count, accepting an integer or an integral float and
+/// clamping anything negative or non-numeric to 0. A wrong count only skews the
+/// non-critical cost estimate, so this never errors.
+fn token_count(json: &Value, pointer: &str) -> u64 {
+    json.pointer(pointer)
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_f64().map(|f| f.max(0.0) as u64))
+        })
+        .unwrap_or(0)
+}
+
 fn endpoint_url(provider: &ProviderConfig) -> String {
     let base = provider.base_url.trim_end_matches('/');
     match provider.protocol {
@@ -179,12 +213,8 @@ fn parse_response(provider: &ProviderConfig, json: &Value) -> Result<AiResponse>
             json.pointer("/choices/0/message/content")
                 .and_then(parse_message_content)
                 .ok_or_else(|| anyhow!("OpenAI-compatible response missing message content"))?,
-            json.pointer("/usage/prompt_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-            json.pointer("/usage/completion_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
+            token_count(json, "/usage/prompt_tokens"),
+            token_count(json, "/usage/completion_tokens"),
         ),
         AiProtocol::Anthropic => (
             json.get("content")
@@ -200,12 +230,8 @@ fn parse_response(provider: &ProviderConfig, json: &Value) -> Result<AiResponse>
                 })
                 .collect::<Vec<_>>()
                 .join(""),
-            json.pointer("/usage/input_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-            json.pointer("/usage/output_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
+            token_count(json, "/usage/input_tokens"),
+            token_count(json, "/usage/output_tokens"),
         ),
     };
 
@@ -255,7 +281,17 @@ fn extract_error_message(body: &str) -> String {
                         .map(ToOwned::to_owned)
                 })
         })
-        .unwrap_or_else(|| body.trim().to_string())
+        .unwrap_or_else(|| {
+            // Non-JSON error page: surface a bounded, char-boundary-safe excerpt
+            // rather than echoing a potentially huge body.
+            let trimmed = body.trim();
+            let excerpt: String = trimmed.chars().take(500).collect();
+            if excerpt.len() < trimmed.len() {
+                format!("{excerpt}…")
+            } else {
+                excerpt
+            }
+        })
 }
 
 fn provider_label(provider: &ProviderConfig) -> String {
@@ -463,6 +499,39 @@ mod tests {
         })
         .unwrap();
         assert_eq!(api_key, "config-token");
+    }
+
+    #[test]
+    fn read_capped_rejects_oversized_body() {
+        use std::io::Cursor;
+        let big = vec![b'a'; 100];
+        let err = read_capped(Cursor::new(big), 50).unwrap_err();
+        assert!(err.to_string().contains("exceeded"));
+    }
+
+    #[test]
+    fn read_capped_accepts_body_within_cap() {
+        use std::io::Cursor;
+        let body = read_capped(Cursor::new(b"hello".to_vec()), 50).unwrap();
+        assert_eq!(body, "hello");
+    }
+
+    #[test]
+    fn token_count_accepts_int_float_and_clamps_negative() {
+        let json: Value = serde_json::from_str(r#"{"i":12,"f":34.0,"neg":-5,"str":"x"}"#).unwrap();
+        assert_eq!(token_count(&json, "/i"), 12);
+        assert_eq!(token_count(&json, "/f"), 34);
+        assert_eq!(token_count(&json, "/neg"), 0);
+        assert_eq!(token_count(&json, "/str"), 0);
+        assert_eq!(token_count(&json, "/missing"), 0);
+    }
+
+    #[test]
+    fn error_message_excerpt_is_bounded() {
+        let body = "x".repeat(5000);
+        let message = extract_error_message(&body);
+        assert!(message.chars().count() <= 501, "message not truncated");
+        assert!(message.ends_with('…'));
     }
 
     fn spawn_server(status: u16, body: &'static str) -> String {
