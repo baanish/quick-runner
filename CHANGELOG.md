@@ -65,7 +65,10 @@ adheres to [Semantic Versioning](https://semver.org/).
   URL to origin; a trailing-slash `go.mod` module path no longer yields an empty
   project name.
 - `atomic::write` uses a per-writer temp filename, so concurrent writers to the
-  same path can't clobber each other.
+  same path can't clobber each other, and it writes *through* a dangling symlink
+  to create its target (matching `fs::write`) instead of replacing the symlink
+  with a regular file — a dotfiles-managed rc symlink survives a temporarily
+  missing target.
 - Oversized token/latency counts saturate instead of wrapping negative, and the
   `qr stats` aggregates can't overflow.
 - The AI provider response body is read through a size cap, and token-usage
