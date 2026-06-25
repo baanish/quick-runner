@@ -84,9 +84,11 @@ impl StatsDb {
             SELECT
                 COUNT(*),
                 COALESCE(SUM(CASE WHEN ai_used = 1 THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(input_tokens), 0),
-                COALESCE(SUM(output_tokens), 0),
-                COALESCE(SUM(CASE WHEN ai_used = 1 THEN latency_ms ELSE 0 END), 0),
+                -- `total()` sums as a float, so saturated i64::MAX rows can't
+                -- overflow the way integer `SUM()` does (which raises on overflow).
+                total(input_tokens),
+                total(output_tokens),
+                total(CASE WHEN ai_used = 1 THEN latency_ms ELSE 0 END),
                 COALESCE(AVG(CASE WHEN ai_used = 1 THEN latency_ms ELSE NULL END), 0.0),
                 COALESCE(SUM(estimated_cost_usd), 0.0),
                 COALESCE(
@@ -100,9 +102,9 @@ impl StatsDb {
             Ok(StatsSummary {
                 total_runs: row.get::<_, i64>(0)? as u64,
                 ai_assisted_runs: row.get::<_, i64>(1)? as u64,
-                input_tokens: row.get::<_, i64>(2)? as u64,
-                output_tokens: row.get::<_, i64>(3)? as u64,
-                total_ai_latency_ms: row.get::<_, i64>(4)? as u64,
+                input_tokens: saturating_u64_from_f64(row.get::<_, f64>(2)?),
+                output_tokens: saturating_u64_from_f64(row.get::<_, f64>(3)?),
+                total_ai_latency_ms: saturating_u64_from_f64(row.get::<_, f64>(4)?),
                 average_ai_latency_ms: row.get::<_, f64>(5)? as u64,
                 estimated_cost_usd: row.get(6)?,
                 last_provider: row.get(7)?,
@@ -136,6 +138,19 @@ impl StatsDb {
 /// to a negative number and silently corrupt later `SUM`/`AVG` aggregates.
 fn saturating_i64(value: u128) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+/// Clamp a floating aggregate (from SQLite `total()`) back to `u64`. Normal sums
+/// are well within f64's exact-integer range; only absurd saturated totals reach
+/// the clamp.
+fn saturating_u64_from_f64(value: f64) -> u64 {
+    if value <= 0.0 {
+        0
+    } else if value >= u64::MAX as f64 {
+        u64::MAX
+    } else {
+        value as u64
+    }
 }
 
 #[cfg(test)]
@@ -175,26 +190,31 @@ mod tests {
     }
 
     #[test]
-    fn huge_counts_saturate_instead_of_wrapping_negative() {
-        // A bare `as i64` turns u64::MAX into -1, which would make summaries
-        // report a nonsensical (and via `as u64`, enormous) token total. Clamping
-        // keeps the stored value non-negative.
+    fn huge_counts_saturate_and_summary_does_not_overflow() {
+        // A bare `as i64` turns u64::MAX into -1 on insert; and once saturated to
+        // i64::MAX, integer SUM() of multiple such rows would raise SQLite's
+        // "integer overflow". Record TWO oversized rows and require summary() to
+        // succeed with a large, non-negative total rather than wrapping or erroring.
         let db = StatsDb::open_in_memory().unwrap();
-        db.record(&CommandStats {
-            command_type: "do".into(),
-            ai_used: true,
-            input_tokens: u64::MAX,
-            output_tokens: u64::MAX,
-            latency_ms: u128::MAX,
-            provider: "x".into(),
-            estimated_cost_usd: 0.0,
-            cost_known: true,
-        })
-        .unwrap();
+        for _ in 0..2 {
+            db.record(&CommandStats {
+                command_type: "do".into(),
+                ai_used: true,
+                input_tokens: u64::MAX,
+                output_tokens: u64::MAX,
+                latency_ms: u128::MAX,
+                provider: "x".into(),
+                estimated_cost_usd: 0.0,
+                cost_known: true,
+            })
+            .unwrap();
+        }
 
         let summary = db.summary().unwrap();
-        assert_eq!(summary.total_runs, 1);
-        assert_eq!(summary.input_tokens, i64::MAX as u64);
-        assert_eq!(summary.output_tokens, i64::MAX as u64);
+        assert_eq!(summary.total_runs, 2);
+        // Two i64::MAX rows -> well above i64::MAX, clamped into u64 without wrap.
+        assert!(summary.input_tokens >= i64::MAX as u64);
+        assert!(summary.output_tokens >= i64::MAX as u64);
+        assert!(summary.total_ai_latency_ms >= i64::MAX as u64);
     }
 }
