@@ -24,8 +24,19 @@ adheres to [Semantic Versioning](https://semver.org/).
 - **Breaking:** `qr run` takes the mode as a flag (`--watch` / `--log` /
   `--output`) instead of a positional token, so a script whose command starts
   with `watch`/`log`/`output` is no longer mis-parsed.
+- **Breaking:** `qr do` uses a single `Run this command? [y/N]` confirmation
+  (default No) for every AI-generated command. The `[do].auto_approve` command
+  allow-list and the tiered "shell features" / "not in allowlist" warnings were
+  removed — an allow-listed program name doesn't bound what it does, so the
+  boundary is the default-No prompt plus the full command preview. An existing
+  `auto_approve` setting is ignored.
+- `qr learn` honors an `entry_points` override in `.qr.toml` (previously a
+  silent no-op) and writes `.qr/profile.json` atomically.
+- Only the current user's `~` is expanded in configured paths; `~user` is left
+  literal (documented on `expand_path`).
 - README and PRD updated to match shipped behavior (platform-specific config
-  paths, the now-implemented `qr do`/`qr learn`, key storage, cron prompt).
+  paths, the now-implemented `qr do`/`qr learn`, key storage, cron prompt, and
+  the single-prompt `qr do` confirmation).
 
 ### Fixed
 - Project cache and shell rc files are written atomically (temp file + rename,
@@ -41,12 +52,33 @@ adheres to [Semantic Versioning](https://semver.org/).
   empty project name; signal-killed children report `128 + signal` instead of a
   flat exit 1.
 - `cargo test` no longer overwrites the developer's real project cache.
+- `qr alias add` keeps a quoted command intact through `qr alias list` (the
+  parser decodes the shell quoting instead of trimming it), and a fish alias
+  whose command contains `=` is parsed correctly.
+- `qr init` fails with a clear error on a closed/empty stdin instead of looping
+  forever.
+- AI price snapshot: a model with a negative or non-finite cost is skipped, and
+  the median can no longer overflow to infinity (which produced an unloadable
+  price table).
+- Git remote name parsing accepts `url=` without spaces, strips a
+  `?query`/`#fragment` suffix, and no longer attributes a non-origin section's
+  URL to origin; a trailing-slash `go.mod` module path no longer yields an empty
+  project name.
+- `atomic::write` uses a per-writer temp filename, so concurrent writers to the
+  same path can't clobber each other.
+- Oversized token/latency counts saturate instead of wrapping negative, and the
+  `qr stats` aggregates can't overflow.
+- The AI provider response body is read through a size cap, and token-usage
+  counts are parsed robustly (integer or float, clamped).
 
 ### Security
-- `qr do` never auto-runs an AI-generated command: every command needs an
-  explicit `y` (default no), commands using shell features (pipes, redirection,
-  multiple commands) get an extra warning, and `rm`/`find` were removed from the
-  default auto-approve list.
+- `qr alias add` validates the alias name and rejects newlines in the command,
+  so a crafted name (e.g. `x; reboot #`) or an embedded newline can no longer
+  inject a command into your shell rc file.
+- `qr do` never auto-runs an AI-generated command: every command is shown in
+  full and runs only after an explicit `y` to a single prompt that defaults to
+  No. There is no command allow-list — an allow-listed program name does not
+  bound what it does.
 - The AI key can be stored in the OS keychain (`qr init` opt-in) instead of
   `config.toml`; keys resolve from env var → config → keychain.
 
