@@ -89,8 +89,16 @@ impl PriceTable {
                 ) else {
                     continue;
                 };
-                if input <= 0.0 && output <= 0.0 {
-                    continue; // free / subscription-plan placeholder
+                // Skip malformed prices (negative or non-finite) and free /
+                // subscription-plan placeholders priced 0/0, so a bad upstream
+                // entry can never surface as a negative or non-finite cost.
+                if !input.is_finite()
+                    || !output.is_finite()
+                    || input < 0.0
+                    || output < 0.0
+                    || (input == 0.0 && output == 0.0)
+                {
+                    continue;
                 }
                 let price = Price { input, output };
                 let norm = normalize_model(raw_id);
@@ -151,7 +159,9 @@ fn median(values: impl Iterator<Item = f64>) -> f64 {
     match sorted.len() {
         0 => 0.0,
         n if n % 2 == 1 => sorted[n / 2],
-        n => (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0,
+        // Halve each side before summing so two large finite prices can't
+        // overflow to infinity (e.g. f64::MAX + f64::MAX).
+        n => sorted[n / 2 - 1] / 2.0 + sorted[n / 2] / 2.0,
     }
 }
 
@@ -228,6 +238,38 @@ mod tests {
             })
         );
         assert_eq!(sample_table().get("nonexistent-model"), None);
+    }
+
+    #[test]
+    fn malformed_negative_price_is_skipped() {
+        // A one-sided negative cost is malformed and must not surface as a
+        // negative cost estimate; the model is dropped from the table.
+        let json = serde_json::from_str(
+            r#"{"evil":{"models":{"bad":{"cost":{"input":-10.0,"output":1.0}}}}}"#,
+        )
+        .unwrap();
+        let table = PriceTable::from_models_dev(&json);
+        assert_eq!(table.get("bad"), None);
+    }
+
+    #[test]
+    fn even_median_of_huge_prices_stays_finite() {
+        // Two carriers each at f64::MAX must not average to infinity (which would
+        // serialize as JSON null and make the saved table unloadable).
+        let json = serde_json::from_str(
+            r#"{
+              "p1":{"models":{"huge":{"cost":{"input":1.7976931348623157e308,"output":1.0}}}},
+              "p2":{"models":{"huge":{"cost":{"input":1.7976931348623157e308,"output":1.0}}}}
+            }"#,
+        )
+        .unwrap();
+        let price = PriceTable::from_models_dev(&json).get("huge").unwrap();
+        assert!(
+            price.input.is_finite(),
+            "median overflowed to {}",
+            price.input
+        );
+        assert_eq!(price.input, f64::MAX);
     }
 
     #[test]
