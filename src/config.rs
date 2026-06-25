@@ -170,6 +170,10 @@ pub fn cache_file_path() -> PathBuf {
     config_dir().join("projects-cache.json")
 }
 
+/// Expand a leading `~` to the **current user's** home directory. Only the bare
+/// `~` / `~/…` form is expanded; `~user` (another user's home) is intentionally
+/// left as a literal path. Resolving `~user` would require an `/etc/passwd`-style
+/// lookup we deliberately don't do — use an absolute path for another user's home.
 pub fn expand_path(value: &str) -> PathBuf {
     PathBuf::from(shellexpand::tilde(value).to_string())
 }
@@ -478,5 +482,15 @@ db_path = "/tmp/file.db"
         assert_eq!(config.ai.api_key_env, "PRIMARY_KEY");
         assert!(config.ai.fallback.is_none());
         clear_test_env();
+    }
+
+    #[test]
+    fn expand_path_expands_current_user_tilde_only() {
+        // `~/…` expands to the current home; `~user` is intentionally left literal,
+        // and absolute paths pass through unchanged.
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(expand_path("~/sub/dir"), home.join("sub/dir"));
+        assert_eq!(expand_path("~someone/dir"), PathBuf::from("~someone/dir"));
+        assert_eq!(expand_path("/abs/path"), PathBuf::from("/abs/path"));
     }
 }
