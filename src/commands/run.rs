@@ -103,7 +103,7 @@ fn run_log(script: &str) -> Result<RunResult> {
     let tee_script = format!(
         "{{ {} ; }} 2>&1 | tee -a {}",
         script,
-        shell_escape(&log_path)
+        crate::shell::sh_single_quote(&log_path)
     );
     let mut child = Command::new("/bin/sh")
         .arg("-c")
@@ -119,15 +119,6 @@ fn run_log(script: &str) -> Result<RunResult> {
     writeln!(io::stdout(), "log written to {log_path}")?;
 
     Ok(result_from_status(status, Some(log_path)))
-}
-
-/// Single-quote a value for `/bin/sh`: wrap in `'…'` and rewrite each embedded
-/// `'` as `'\''` (close-quote, escaped quote, reopen-quote). The previous
-/// `'\'` rewrite was missing the reopening quote, so a value containing a quote
-/// produced an unterminated/escaping-broken word — latent today because the log
-/// path is always `qr-log-<digits>.log`, but wrong for any quoted value.
-fn shell_escape(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 fn shell_command(script: &str) -> Command {
@@ -180,25 +171,5 @@ mod tests {
             resolve_mode(&config, true, false, false).unwrap(),
             RunMode::Watch
         );
-    }
-
-    #[test]
-    fn shell_escape_makes_a_single_literal_word() {
-        // Each escaped value must be seen by /bin/sh as exactly one literal word,
-        // even with embedded quotes/metacharacters — so the tee target can never
-        // break out of the log redirection.
-        for value in ["plain", "qr-log-1.log", "a'b", "x'; touch pwn #", "$(id)"] {
-            let quoted = shell_escape(value);
-            let out = std::process::Command::new("/bin/sh")
-                .arg("-c")
-                .arg(format!("printf %s {quoted}"))
-                .output()
-                .unwrap();
-            assert_eq!(
-                String::from_utf8_lossy(&out.stdout),
-                value,
-                "shell_escape round-trip failed for {value:?} (quoted: {quoted})"
-            );
-        }
     }
 }

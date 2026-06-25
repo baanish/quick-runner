@@ -121,7 +121,7 @@ pub fn detect_profile(root: &Path) -> Result<ProjectProfile> {
         lint_command: None,
         scripts: BTreeMap::new(),
         prefer_agent: None,
-        entry_points: detect_common_entry_points(root),
+        entry_points: detect_entry_points(root, &["src/", "tests/", "docs/"]),
     })
 }
 
@@ -171,7 +171,18 @@ fn detect_node_profile(root: &Path) -> Result<ProjectProfile> {
         ),
         scripts,
         prefer_agent: None,
-        entry_points: detect_node_entry_points(root),
+        entry_points: detect_entry_points(
+            root,
+            &[
+                "src/app/",
+                "src/pages/",
+                "src/server/",
+                "app/",
+                "server/",
+                "index.ts",
+                "index.js",
+            ],
+        ),
     })
 }
 
@@ -179,13 +190,7 @@ fn detect_rust_profile(root: &Path) -> Result<ProjectProfile> {
     let raw = fs::read_to_string(root.join("Cargo.toml"))
         .with_context(|| format!("Failed to read {}", root.join("Cargo.toml").display()))?;
     let toml: TomlValue = toml::from_str(&raw).context("Failed to parse Cargo.toml")?;
-    let name = toml
-        .get("package")
-        .and_then(TomlValue::as_table)
-        .and_then(|pkg| pkg.get("name"))
-        .and_then(TomlValue::as_str)
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| fallback_name(root));
+    let name = toml_name(&toml, "package", root);
 
     let mut scripts = BTreeMap::new();
     scripts.insert("build".into(), "cargo build".into());
@@ -202,7 +207,7 @@ fn detect_rust_profile(root: &Path) -> Result<ProjectProfile> {
         lint_command: Some("cargo clippy".into()),
         scripts,
         prefer_agent: None,
-        entry_points: detect_rust_entry_points(root),
+        entry_points: detect_entry_points(root, &["src/main.rs", "src/lib.rs", "src/bin/"]),
     })
 }
 
@@ -210,13 +215,7 @@ fn detect_python_profile(root: &Path) -> Result<ProjectProfile> {
     let raw = fs::read_to_string(root.join("pyproject.toml"))
         .with_context(|| format!("Failed to read {}", root.join("pyproject.toml").display()))?;
     let toml: TomlValue = toml::from_str(&raw).context("Failed to parse pyproject.toml")?;
-    let name = toml
-        .get("project")
-        .and_then(TomlValue::as_table)
-        .and_then(|project| project.get("name"))
-        .and_then(TomlValue::as_str)
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| fallback_name(root));
+    let name = toml_name(&toml, "project", root);
 
     let framework = if root.join("manage.py").is_file() {
         Some("django".into())
@@ -240,7 +239,7 @@ fn detect_python_profile(root: &Path) -> Result<ProjectProfile> {
         lint_command: None,
         scripts,
         prefer_agent: None,
-        entry_points: detect_common_entry_points(root),
+        entry_points: detect_entry_points(root, &["src/", "tests/", "docs/"]),
     })
 }
 
@@ -270,7 +269,7 @@ fn detect_go_profile(root: &Path) -> Result<ProjectProfile> {
         lint_command: None,
         scripts,
         prefer_agent: None,
-        entry_points: detect_go_entry_points(root),
+        entry_points: detect_entry_points(root, &["main.go", "cmd/", "internal/"]),
     })
 }
 
@@ -323,6 +322,17 @@ fn fallback_name(root: &Path) -> String {
     root.file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| root.display().to_string())
+}
+
+/// The `<section>.name` string from a parsed TOML manifest (e.g. `[package]` for
+/// Cargo, `[project]` for pyproject), falling back to the directory name.
+fn toml_name(toml: &TomlValue, section: &str, root: &Path) -> String {
+    toml.get(section)
+        .and_then(TomlValue::as_table)
+        .and_then(|table| table.get("name"))
+        .and_then(TomlValue::as_str)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| fallback_name(root))
 }
 
 fn detect_package_manager(json: &JsonValue, root: &Path) -> Option<String> {
@@ -392,43 +402,13 @@ fn qualify_script_command(
     }
 }
 
-fn detect_node_entry_points(root: &Path) -> Vec<String> {
-    [
-        "src/app/",
-        "src/pages/",
-        "src/server/",
-        "app/",
-        "server/",
-        "index.ts",
-        "index.js",
-    ]
-    .into_iter()
-    .filter(|entry| root.join(entry.trim_end_matches('/')).exists())
-    .map(ToOwned::to_owned)
-    .collect()
-}
-
-fn detect_rust_entry_points(root: &Path) -> Vec<String> {
-    ["src/main.rs", "src/lib.rs", "src/bin/"]
-        .into_iter()
+/// Keep the candidate entry points that actually exist under `root` (a trailing
+/// `/` marks a directory candidate), preserving the given order.
+fn detect_entry_points(root: &Path, candidates: &[&str]) -> Vec<String> {
+    candidates
+        .iter()
         .filter(|entry| root.join(entry.trim_end_matches('/')).exists())
-        .map(ToOwned::to_owned)
-        .collect()
-}
-
-fn detect_go_entry_points(root: &Path) -> Vec<String> {
-    ["main.go", "cmd/", "internal/"]
-        .into_iter()
-        .filter(|entry| root.join(entry.trim_end_matches('/')).exists())
-        .map(ToOwned::to_owned)
-        .collect()
-}
-
-fn detect_common_entry_points(root: &Path) -> Vec<String> {
-    ["src/", "tests/", "docs/"]
-        .into_iter()
-        .filter(|entry| root.join(entry.trim_end_matches('/')).exists())
-        .map(ToOwned::to_owned)
+        .map(|entry| (*entry).to_owned())
         .collect()
 }
 
