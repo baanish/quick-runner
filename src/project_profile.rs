@@ -53,6 +53,7 @@ struct ProjectProfileOverride {
     prefer_agent: Option<String>,
     #[serde(default)]
     scripts: BTreeMap<String, String>,
+    entry_points: Option<Vec<String>>,
 }
 
 pub fn learn_current_dir() -> Result<LearnResult> {
@@ -65,7 +66,10 @@ pub fn learn_current_dir() -> Result<LearnResult> {
     fs::create_dir_all(&profile_dir)
         .with_context(|| format!("Failed to create {}", profile_dir.display()))?;
     let profile_path = profile_dir.join("profile.json");
-    fs::write(&profile_path, serde_json::to_vec_pretty(&profile)?)
+    // Atomic write: `qr do` may read profile.json (via load_profile_from) while a
+    // concurrent `qr learn` rewrites it; a truncate-then-write would let the
+    // reader observe a partial/garbage profile.
+    crate::atomic::write(&profile_path, &serde_json::to_vec_pretty(&profile)?)
         .with_context(|| format!("Failed to write {}", profile_path.display()))?;
 
     Ok(LearnResult {
@@ -246,7 +250,9 @@ fn detect_go_profile(root: &Path) -> Result<ProjectProfile> {
     let name = raw
         .lines()
         .find_map(|line| line.trim().strip_prefix("module "))
+        .map(|module| module.trim().trim_end_matches('/'))
         .and_then(|module| module.rsplit('/').next())
+        .filter(|name| !name.is_empty())
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| fallback_name(root));
 
@@ -302,6 +308,9 @@ fn apply_overrides(root: &Path, profile: &mut ProjectProfile) -> Result<()> {
     }
     if let Some(value) = overrides.prefer_agent {
         profile.prefer_agent = Some(value);
+    }
+    if let Some(value) = overrides.entry_points {
+        profile.entry_points = value;
     }
     for (key, value) in overrides.scripts {
         profile.scripts.insert(key, value);
@@ -491,5 +500,53 @@ dev = "cargo run"
             profile.scripts.get("dev").map(String::as_str),
             Some("cargo run")
         );
+    }
+
+    #[test]
+    fn qr_toml_overrides_entry_points() {
+        // `entry_points` was missing from the override struct, so this key was a
+        // silent no-op; it must now replace the detected entry points.
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(
+            tmp.path().join(".qr.toml"),
+            "entry_points = [\"custom/main.rs\"]\n",
+        )
+        .unwrap();
+
+        let mut profile = detect_profile(tmp.path()).unwrap();
+        apply_overrides(tmp.path(), &mut profile).unwrap();
+        assert_eq!(profile.entry_points, vec!["custom/main.rs".to_string()]);
+    }
+
+    #[test]
+    fn go_module_with_trailing_slash_yields_last_segment_not_empty() {
+        // `module github.com/acme/` previously yielded an empty project name;
+        // it must now resolve to the last real path segment.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("acme-svc");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("go.mod"), "module github.com/acme/\n\ngo 1.22\n").unwrap();
+
+        let profile = detect_profile(&root).unwrap();
+        assert_eq!(profile.name, "acme");
+        assert!(!profile.name.is_empty());
+    }
+
+    #[test]
+    fn go_module_that_is_only_slashes_falls_back_to_dir_name() {
+        // A degenerate `module /` has no real segment, so the directory name is
+        // used rather than an empty string.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("acme-svc");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("go.mod"), "module /\n\ngo 1.22\n").unwrap();
+
+        let profile = detect_profile(&root).unwrap();
+        assert_eq!(profile.name, "acme-svc");
     }
 }
