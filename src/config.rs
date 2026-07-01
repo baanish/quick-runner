@@ -90,16 +90,20 @@ impl AppConfig {
     }
 
     pub fn load_from_env_with_path(path: PathBuf) -> Result<Self> {
-        let mut config = if path.exists() {
-            let raw = fs::read_to_string(&path)
-                .with_context(|| format!("Failed to read config file {}", path.display()))?;
-            Self::load_from_str(&raw)?
-        } else {
-            Self::load_from_str(DEFAULT_CONFIG)?
-        };
-
+        let mut config = Self::load_file_without_env(&path)?;
         apply_env_overrides(&mut config)?;
         Ok(config)
+    }
+
+    /// Parse `config.toml` on disk without applying `QR_*` env overrides.
+    pub fn load_file_without_env(path: &Path) -> Result<Self> {
+        if path.exists() {
+            let raw = fs::read_to_string(path)
+                .with_context(|| format!("Failed to read config file {}", path.display()))?;
+            Self::load_from_str(&raw)
+        } else {
+            Self::load_from_str(DEFAULT_CONFIG)
+        }
     }
 
     pub fn ensure_parent_dirs(&self) -> Result<()> {
