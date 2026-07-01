@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::Once,
 };
 
@@ -193,7 +193,11 @@ pub fn migrate_legacy_config(new_dir: &Path, legacy_dir: Option<&Path>) -> Resul
 
     let mut legacy_files: Vec<_> = fs::read_dir(legacy_dir)?
         .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter(|entry| {
+            entry
+                .file_type()
+                .is_ok_and(|kind| kind.is_file() || kind.is_symlink())
+        })
         .collect();
 
     if legacy_files.is_empty() {
@@ -210,7 +214,7 @@ pub fn migrate_legacy_config(new_dir: &Path, legacy_dir: Option<&Path>) -> Resul
         let src = entry.path();
         let dest = new_dir.join(entry.file_name());
         if dest.exists() {
-            if src.is_file() {
+            if src.exists() {
                 fs::remove_file(&src)?;
                 moved_any = true;
             }
@@ -234,7 +238,7 @@ pub fn migrate_legacy_config(new_dir: &Path, legacy_dir: Option<&Path>) -> Resul
 
     let config_path = new_dir.join("config.toml");
     if config_path.exists() {
-        rewrite_legacy_paths_in_config(&config_path, legacy_dir)?;
+        rewrite_legacy_paths_in_config(&config_path, legacy_dir, new_dir)?;
     }
 
     fs::write(
@@ -245,7 +249,11 @@ pub fn migrate_legacy_config(new_dir: &Path, legacy_dir: Option<&Path>) -> Resul
     Ok(moved_any)
 }
 
-fn rewrite_legacy_paths_in_config(config_path: &Path, legacy_dir: &Path) -> Result<()> {
+fn rewrite_legacy_paths_in_config(
+    config_path: &Path,
+    legacy_dir: &Path,
+    new_dir: &Path,
+) -> Result<()> {
     let raw = fs::read_to_string(config_path)?;
     let config = AppConfig::load_from_str(&raw)?;
 
@@ -254,14 +262,46 @@ fn rewrite_legacy_paths_in_config(config_path: &Path, legacy_dir: &Path) -> Resu
     }
 
     let db_path = expand_path(&config.stats.db_path);
-    let default_legacy_db = legacy_dir.join("stats.db");
-    if path_is_under(&db_path, legacy_dir) || db_path == default_legacy_db {
-        if let Some(updated) = rewrite_stats_db_path_in_toml(&raw, "__default__")? {
-            fs::write(config_path, updated)?;
-        }
+    let Some(new_value) = migrated_stats_db_path(&db_path, legacy_dir, new_dir) else {
+        return Ok(());
+    };
+
+    if let Some(updated) = rewrite_stats_db_path_in_toml(&raw, &new_value)? {
+        fs::write(config_path, updated)?;
     }
 
     Ok(())
+}
+
+fn migrated_stats_db_path(db_path: &Path, legacy_dir: &Path, new_dir: &Path) -> Option<String> {
+    let default_legacy_db = legacy_dir.join("stats.db");
+    if db_path == default_legacy_db {
+        return Some("__default__".into());
+    }
+    if !path_is_under(db_path, legacy_dir) {
+        return None;
+    }
+    let relative = db_path.strip_prefix(legacy_dir).ok()?;
+    let relative = relative
+        .strip_prefix(Component::RootDir)
+        .unwrap_or(relative);
+    Some(path_for_config(&new_dir.join(relative)))
+}
+
+fn path_for_config(path: &Path) -> String {
+    if let Some(home) = dirs::home_dir() {
+        if let Ok(rest) = path.strip_prefix(&home) {
+            let rest = rest.to_string_lossy();
+            return if rest.is_empty() {
+                "~".into()
+            } else if rest.starts_with('/') {
+                format!("~{rest}")
+            } else {
+                format!("~/{rest}")
+            };
+        }
+    }
+    path.display().to_string()
 }
 
 fn rewrite_stats_db_path_in_toml(raw: &str, new_value: &str) -> Result<Option<String>> {
@@ -715,12 +755,74 @@ db_path = "{}"
         )
         .unwrap();
 
-        rewrite_legacy_paths_in_config(&config_path, &legacy).unwrap();
+        rewrite_legacy_paths_in_config(&config_path, &legacy, root.path()).unwrap();
 
         let updated = fs::read_to_string(&config_path).unwrap();
         assert!(updated.contains("# my custom config"));
         assert!(updated.contains("# keep stats near the legacy db"));
         assert!(updated.contains("db_path = \"__default__\""));
         assert!(!updated.contains(&legacy_db.display().to_string()));
+    }
+
+    #[test]
+    fn migrate_legacy_config_preserves_custom_stats_db_filename() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join("legacy");
+        let new_dir = root.path().join("new");
+        fs::create_dir_all(&legacy).unwrap();
+        let custom_db = legacy.join("work-stats.db");
+        fs::write(&custom_db, b"sqlite").unwrap();
+        fs::write(
+            legacy.join("config.toml"),
+            format!(
+                r#"
+[general]
+default_run_mode = "output"
+[projects]
+roots = ["~/Code"]
+scan_depth = 2
+scan_interval_hours = 1
+[ai]
+protocol = "openai"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o"
+api_key = ""
+api_key_env = "OPENAI_API_KEY"
+[stats]
+enabled = true
+db_path = "{}"
+"#,
+                custom_db.display()
+            ),
+        )
+        .unwrap();
+
+        migrate_legacy_config(&new_dir, Some(&legacy)).unwrap();
+
+        assert!(new_dir.join("work-stats.db").exists());
+        let config = AppConfig::load_from_env_with_path(new_dir.join("config.toml")).unwrap();
+        assert_eq!(
+            expand_path(&config.stats.db_path),
+            new_dir.join("work-stats.db")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migrate_legacy_config_moves_symlinked_config() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join("legacy");
+        let new_dir = root.path().join("new");
+        let real_config = root.path().join("real-config.toml");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(&real_config, default_config_str()).unwrap();
+        symlink(&real_config, legacy.join("config.toml")).unwrap();
+
+        let migrated = migrate_legacy_config(&new_dir, Some(&legacy)).unwrap();
+        assert!(migrated);
+        assert!(new_dir.join("config.toml").exists());
+        assert!(!legacy.join("config.toml").exists());
     }
 }
