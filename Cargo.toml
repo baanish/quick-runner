@@ -5,6 +5,11 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT"
 description = "QuickRunner (qr) is a blazing-fast, AI-augmented developer shell helper."
+repository = "https://github.com/baanish/quick-runner"
+homepage = "https://github.com/baanish/quick-runner"
+readme = "README.md"
+keywords = ["cli", "developer-tools", "shell", "ai", "rust"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "qr"
