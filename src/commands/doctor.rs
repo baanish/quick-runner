@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use crate::{
-    config::{AppConfig, cache_file_path, config_file_path},
+    config::{AppConfig, cache_file_path, config_file_path, legacy_config_dir},
     scanner::read_project_cache,
 };
 
@@ -56,6 +56,20 @@ pub fn run() -> Result<()> {
 
     if let Some(config) = config {
         println!("roots:  {}", config.projects.roots.join(", "));
+    }
+
+    if let Some(legacy_path) = legacy_config_dir() {
+        if legacy_path.exists() {
+            let has_files = std::fs::read_dir(&legacy_path)
+                .map(|entries| entries.filter_map(Result::ok).any(|e| e.path().is_file()))
+                .unwrap_or(false);
+            if has_files {
+                println!(
+                    "legacy: {} — still has files (config was moved to ~/.qr; safe to remove after verifying)",
+                    legacy_path.display()
+                );
+            }
+        }
     }
 
     Ok(())

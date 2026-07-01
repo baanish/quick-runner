@@ -21,6 +21,10 @@ adheres to [Semantic Versioning](https://semver.org/).
   `fmt --check` and `clippy -D warnings`).
 
 ### Changed
+- **Breaking:** global config, cache, stats DB, and price table now live under
+  `~/.qr/` instead of the platform config directory (`~/.config/qr/` on Linux,
+  `~/Library/Application Support/qr/` on macOS). Existing installs are migrated
+  automatically on first run.
 - **Breaking:** `qr run` takes the mode as a flag (`--watch` / `--log` /
   `--output`) instead of a positional token, so a script whose command starts
   with `watch`/`log`/`output` is no longer mis-parsed.

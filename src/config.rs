@@ -1,6 +1,7 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
+    sync::Once,
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -150,14 +151,108 @@ impl AppConfig {
     }
 }
 
+/// Legacy config location before ~/.qr (XDG config dir on Linux, Application
+/// Support on macOS).
+pub fn legacy_config_dir() -> Option<PathBuf> {
+    dirs::config_dir().map(|base| base.join("qr"))
+}
+
 pub fn config_dir() -> PathBuf {
     if let Ok(override_dir) = std::env::var("QR_CONFIG_DIR") {
         return PathBuf::from(override_dir);
     }
-    if let Some(base) = dirs::config_dir() {
-        return base.join("qr");
+    let dir = dirs::home_dir()
+        .map(|home| home.join(".qr"))
+        .unwrap_or_else(|| PathBuf::from(".qr"));
+
+    static MIGRATE_ONCE: Once = Once::new();
+    MIGRATE_ONCE.call_once(|| {
+        if let Err(error) = migrate_legacy_config(&dir, legacy_config_dir().as_deref()) {
+            eprintln!("qr: warning: failed to migrate legacy config: {error:#}");
+        }
+    });
+
+    dir
+}
+
+/// Move config files from the legacy directory into `new_dir` when the new
+/// location has no `config.toml` yet. Returns `true` when files were migrated.
+pub fn migrate_legacy_config(new_dir: &Path, legacy_dir: Option<&Path>) -> Result<bool> {
+    let Some(legacy_dir) = legacy_dir else {
+        return Ok(false);
+    };
+
+    if new_dir.join("config.toml").exists() {
+        return Ok(false);
     }
-    PathBuf::from(".config/qr")
+
+    if !legacy_dir.is_dir() {
+        return Ok(false);
+    }
+
+    let legacy_files: Vec<_> = fs::read_dir(legacy_dir)?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .collect();
+
+    if legacy_files.is_empty() {
+        return Ok(false);
+    }
+
+    fs::create_dir_all(new_dir)?;
+
+    for entry in &legacy_files {
+        let src = entry.path();
+        let dest = new_dir.join(entry.file_name());
+        if dest.exists() {
+            continue;
+        }
+        if fs::rename(&src, &dest).is_err() {
+            fs::copy(&src, &dest)?;
+            fs::remove_file(&src)?;
+        }
+    }
+
+    if fs::read_dir(legacy_dir)?.next().is_none() {
+        let _ = fs::remove_dir(legacy_dir);
+    }
+
+    let config_path = new_dir.join("config.toml");
+    if config_path.exists() {
+        rewrite_legacy_paths_in_config(&config_path, legacy_dir)?;
+    }
+
+    fs::write(
+        new_dir.join(".migrated-from-legacy"),
+        legacy_dir.display().to_string(),
+    )?;
+
+    Ok(true)
+}
+
+fn rewrite_legacy_paths_in_config(config_path: &Path, legacy_dir: &Path) -> Result<()> {
+    let raw = fs::read_to_string(config_path)?;
+    let mut config = AppConfig::load_from_str(&raw)?;
+
+    if config.stats.db_path.is_empty() || config.stats.db_path == "__default__" {
+        return Ok(());
+    }
+
+    let db_path = expand_path(&config.stats.db_path);
+    let default_legacy_db = legacy_dir.join("stats.db");
+    if path_is_under(&db_path, legacy_dir) || db_path == default_legacy_db {
+        config.stats.db_path = "__default__".into();
+        fs::write(config_path, toml::to_string_pretty(&config)?)?;
+    }
+
+    Ok(())
+}
+
+fn path_is_under(path: &Path, parent: &Path) -> bool {
+    match (path.canonicalize(), parent.canonicalize()) {
+        (Ok(path), Ok(parent)) => path.starts_with(parent),
+        _ => path.starts_with(parent),
+    }
 }
 
 pub fn config_file_path() -> PathBuf {
@@ -465,5 +560,76 @@ db_path = "/tmp/file.db"
         assert_eq!(expand_path("~/sub/dir"), home.join("sub/dir"));
         assert_eq!(expand_path("~someone/dir"), PathBuf::from("~someone/dir"));
         assert_eq!(expand_path("/abs/path"), PathBuf::from("/abs/path"));
+    }
+
+    #[test]
+    fn migrate_legacy_config_moves_files_when_new_dir_empty() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join("legacy");
+        let new_dir = root.path().join("new");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("config.toml"), default_config_str()).unwrap();
+        fs::write(legacy.join("projects-cache.json"), "[]").unwrap();
+
+        let migrated = migrate_legacy_config(&new_dir, Some(&legacy)).unwrap();
+        assert!(migrated);
+        assert!(new_dir.join("config.toml").exists());
+        assert!(new_dir.join("projects-cache.json").exists());
+        assert!(new_dir.join(".migrated-from-legacy").exists());
+        assert!(!legacy.join("config.toml").exists());
+    }
+
+    #[test]
+    fn migrate_legacy_config_skips_when_new_config_exists() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join("legacy");
+        let new_dir = root.path().join("new");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&new_dir).unwrap();
+        fs::write(legacy.join("config.toml"), "legacy").unwrap();
+        fs::write(new_dir.join("config.toml"), "new").unwrap();
+
+        let migrated = migrate_legacy_config(&new_dir, Some(&legacy)).unwrap();
+        assert!(!migrated);
+        assert_eq!(fs::read_to_string(new_dir.join("config.toml")).unwrap(), "new");
+        assert!(legacy.join("config.toml").exists());
+    }
+
+    #[test]
+    fn migrate_legacy_config_rewrites_stats_db_path_under_legacy_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join("legacy");
+        let new_dir = root.path().join("new");
+        fs::create_dir_all(&legacy).unwrap();
+        let legacy_db = legacy.join("stats.db");
+        fs::write(
+            legacy.join("config.toml"),
+            format!(
+                r#"
+[general]
+default_run_mode = "output"
+[projects]
+roots = ["~/Code"]
+scan_depth = 2
+scan_interval_hours = 1
+[ai]
+protocol = "openai"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o"
+api_key = ""
+api_key_env = "OPENAI_API_KEY"
+[stats]
+enabled = true
+db_path = "{}"
+"#,
+                legacy_db.display()
+            ),
+        )
+        .unwrap();
+
+        migrate_legacy_config(&new_dir, Some(&legacy)).unwrap();
+
+        let config = AppConfig::load_from_env_with_path(new_dir.join("config.toml")).unwrap();
+        assert_eq!(config.stats.db_path, "__default__");
     }
 }
