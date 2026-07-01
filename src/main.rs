@@ -280,7 +280,7 @@ fn record_stats(config: &AppConfig, stats: &CommandStats) -> Result<()> {
 fn execute_init(args: InitArgs) -> Result<()> {
     let config_path = config_file_path();
     let existing = if config_path.exists() {
-        Some(AppConfig::load_from_env_with_path(config_path.clone()))
+        Some(AppConfig::load_file_without_env(&config_path))
     } else {
         None
     };
@@ -344,9 +344,7 @@ fn execute_init(args: InitArgs) -> Result<()> {
         AppConfig::load_from_env_with_path(config_path.clone())?
     } else {
         println!("config already present at {}", config_path.display());
-        existing
-            .transpose()?
-            .expect("existing config must be loaded when no recreation is needed")
+        AppConfig::load_from_env_with_path(config_path.clone())?
     };
 
     if !args.no_shell_wrapper {
@@ -391,7 +389,7 @@ fn prompt_provider_fields(label: &str) -> Result<(AiProtocol, String, String, St
 
 fn prompt_ai_config(label: &str) -> Result<AiConfig> {
     let (protocol, base_url, model, api_key, api_key_env) = prompt_provider_fields(label)?;
-    let api_key = maybe_store_key_in_keychain(protocol, &api_key_env, api_key)?;
+    let api_key = maybe_store_key_in_keychain("primary", protocol, &api_key_env, api_key)?;
 
     let fallback = if prompt_bool("Configure a fallback provider?", false)? {
         Some(prompt_fallback_ai_config()?)
@@ -445,6 +443,7 @@ fn run_cost(config: &AppConfig, refresh: bool) -> Result<()> {
 /// keychain, otherwise the key itself (config storage is the fallback when the
 /// user declines or the keychain is unavailable).
 fn maybe_store_key_in_keychain(
+    role: &str,
     protocol: AiProtocol,
     api_key_env: &str,
     api_key: String,
@@ -456,7 +455,7 @@ fn maybe_store_key_in_keychain(
         println!("API key will be stored in config.toml");
         return Ok(api_key);
     }
-    let account = secret::account_for(api_key_env, protocol.default_api_key_env());
+    let account = secret::account_for(role, api_key_env, protocol.default_api_key_env());
     match secret::set(&account, &api_key) {
         Ok(()) => {
             println!("✔ stored API key in the OS keychain (account \"{account}\")");
@@ -474,7 +473,7 @@ fn maybe_store_key_in_keychain(
 
 fn prompt_fallback_ai_config() -> Result<FallbackAiConfig> {
     let (protocol, base_url, model, api_key, api_key_env) = prompt_provider_fields("fallback")?;
-    let api_key = maybe_store_key_in_keychain(protocol, &api_key_env, api_key)?;
+    let api_key = maybe_store_key_in_keychain("fallback", protocol, &api_key_env, api_key)?;
     Ok(FallbackAiConfig {
         protocol,
         base_url,
