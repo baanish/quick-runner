@@ -563,40 +563,28 @@ fn prompt(label: &str) -> Result<Option<String>> {
 fn install_cron() -> Result<()> {
     let exe = env::current_exe().context("Could not resolve qr binary path")?;
     let cron_line = shell::cron_line(&exe);
-    let current = Command::new("crontab").arg("-l").output();
+    let output = Command::new("crontab")
+        .arg("-l")
+        .output()
+        .context("Failed to run `crontab -l`")?;
+    let existing = shell::crontab_contents_from_list_output(&output)?;
 
-    match current {
-        Ok(output) => {
-            let existing = String::from_utf8_lossy(&output.stdout);
-            if existing.contains(&cron_line) {
-                println!("cron entry already present");
-                return Ok(());
-            }
+    let Some(merged) = shell::merge_cron_entry(&existing, &cron_line) else {
+        println!("cron entry already present");
+        return Ok(());
+    };
 
-            let mut merged = existing.to_string();
-            if !merged.ends_with('\n') && !merged.is_empty() {
-                merged.push('\n');
-            }
-            merged.push_str(&cron_line);
-            merged.push('\n');
-
-            let mut child = Command::new("crontab")
-                .arg("-")
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-                .context("Failed to update crontab")?;
-            child.stdin.take().unwrap().write_all(merged.as_bytes())?;
-            let status = child.wait()?;
-            if !status.success() {
-                return Err(anyhow!("crontab rejected the new entry"));
-            }
-            println!("installed hourly scan cron");
-        }
-        Err(_) => {
-            println!("Could not update crontab automatically. Add this entry manually:");
-            println!("{}", cron_line);
-        }
+    let mut child = Command::new("crontab")
+        .arg("-")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .context("Failed to update crontab")?;
+    child.stdin.take().unwrap().write_all(merged.as_bytes())?;
+    let status = child.wait()?;
+    if !status.success() {
+        return Err(anyhow!("crontab rejected the new entry"));
     }
+    println!("installed hourly scan cron");
 
     Ok(())
 }
