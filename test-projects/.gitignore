@@ -1,0 +1,14 @@
+# Build artifacts / caches produced by running the sample projects
+target/
+node_modules/
+__pycache__/
+*.pyc
+
+# Lockfiles generated on first run (not needed for these dependency-free samples)
+Cargo.lock
+
+# qr learn output
+.qr/
+
+# qr run --log output
+qr-log-*.log
