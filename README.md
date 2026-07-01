@@ -1,11 +1,11 @@
 # QuickRunner
 
-QuickRunner (`qr`) is a fast Rust CLI for common developer shell workflows: jumping to projects, running scripts, managing aliases, scanning project roots, tracking lightweight command stats, and an AI router (`qr do`) that turns natural language into a shell command or a hand-off to a coding agent. Every config key can be overridden via `QR_` environment variables.
+QuickRunner (`qr`) is a fast Rust CLI for common developer shell workflows: jumping to projects, running scripts, managing aliases, scanning project roots, tracking lightweight command stats, and an AI router (`qr do`) that turns natural language into a shell command or a hand-off to a coding agent.
 
 ## Features
 
 - `qr go <project>` / `qr g`: fuzzy project lookup backed by a cached scanner (interactive picker on multiple matches)
-- `qr run [watch|log|output] <script>` / `qr r`: script runner with watch, log, and passthrough modes
+- `qr run [--watch|--log|--output] <script>` / `qr r`: script runner with watch, log, and passthrough modes
 - `qr alias add|list|remove` / `qr a`: shell alias management
 - `qr stats` / `qr s`: aggregated command stats from a local SQLite database
 - `qr scan` / `qr x`: manual project rescan
@@ -33,14 +33,14 @@ Run `qr config path` to print the exact location:
 
 On first run after upgrading, QuickRunner automatically migrates an existing config from the legacy location (`~/.config/qr/` on Linux, `~/Library/Application Support/qr/` on macOS) into `~/.qr/`. Set `QR_CONFIG_DIR` to override the directory (used in tests and CI).
 
-Defaults come from [`config/default.toml`](config/default.toml). Environment variables (`QR_*`) override every config key — e.g. `QR_PROJECT_ROOTS` (colon-separated), `QR_SCAN_DEPTH`, `QR_AI_MODEL`, `QR_STATS_ENABLED`; see `config/default.toml` for the full list.
+Defaults come from [`config/default.toml`](config/default.toml). Common runtime settings also have `QR_*` environment overrides for automation and CI — e.g. `QR_PROJECT_ROOTS` (colon-separated), `QR_SCAN_DEPTH`, `QR_AI_MODEL`, and `QR_STATS_ENABLED`. See [`src/config.rs`](src/config.rs) for the supported override list.
 
 ### AI key
 
-`qr do` / `qr learn` need an API key. It is resolved in this order: a custom env var (`api_key_env`), the protocol's well-known env var (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY`), the `api_key` in `config.toml`, then the OS keychain. `qr init` offers to store the key in the OS keychain (recommended) so it stays out of `config.toml`.
+`qr do` needs an API key. It is resolved in this order: a custom env var (`api_key_env`), the protocol's well-known env var (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY`), the `api_key` in `config.toml`, then the OS keychain. `qr init` offers to store the key in the OS keychain (recommended) so it stays out of `config.toml`. `qr learn` is local and does not make a live model call.
 
 ## Notes
 
 - The stats line is printed on `stderr`, so `qr go --print-path` keeps stdout clean for the shell wrapper's `cd`.
-- `qr do` never runs a command on a bare Enter: you must explicitly type `y`, and commands using shell features (pipes, redirection, multiple commands) get an extra warning.
+- `qr do` always previews the full AI-generated command and runs it only after `Run this command? [y/N]`; bare Enter is No.
 - Recording stats writes to SQLite on each command (best-effort — a failure never fails the command). Disable with `stats.enabled = false`.
