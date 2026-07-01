@@ -106,6 +106,10 @@ pub fn shell_wrapper_snippet(shell: ShellKind, binary_name: &str) -> String {
             r#"function {binary_name}
     if test (count $argv) -gt 0; and test $argv[1] = go -o $argv[1] = g
         set -l target (command {binary_name} go $argv[2..-1] --print-path)
+        set -l go_status $status
+        if test $go_status -ne 0
+            return $go_status
+        end
         if test -n "$target"
             cd $target
         end
@@ -118,7 +122,7 @@ end"#
             r#"{binary_name}() {{
   if [ "$1" = "go" ] || [ "$1" = "g" ]; then
     local dir
-    dir=$(command {binary_name} go "${{@:2}}" --print-path)
+    dir=$(command {binary_name} go "${{@:2}}" --print-path) || return $?
     if [ -n "$dir" ]; then
       cd "$dir"
     fi
@@ -287,8 +291,14 @@ mod tests {
 
     #[test]
     fn wrapper_generation_matches_shell() {
-        assert!(shell_wrapper_snippet(ShellKind::Zsh, "qr").contains(r#"dir=$(command qr go"#));
-        assert!(shell_wrapper_snippet(ShellKind::Fish, "qr").contains("function qr"));
+        let zsh = shell_wrapper_snippet(ShellKind::Zsh, "qr");
+        assert!(zsh.contains(r#"dir=$(command qr go"#));
+        assert!(zsh.contains("|| return $?"));
+
+        let fish = shell_wrapper_snippet(ShellKind::Fish, "qr");
+        assert!(fish.contains("function qr"));
+        assert!(fish.contains("set -l go_status $status"));
+        assert!(fish.contains("return $go_status"));
     }
 
     #[test]
