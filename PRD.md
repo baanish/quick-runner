@@ -205,7 +205,7 @@ Natural language → action router. Classifies intent, generates a command or de
 | Tier | Example | Behavior |
 |---|---|---|
 | **Inline** | `qr do "run tests"`, `qr do "lint"` | Generates a shell command, shows preview, executes on approval |
-| **Delegate** | `qr do "refactor auth to use JWT"`, `qr do "add pagination to the API"` | Recognizes multi-step coding work, suggests handing off to Codex (`codex exec`) or Claude Code (`claude --dangerously-skip-permissions`) |
+| **Delegate** | `qr do "refactor auth to use JWT"`, `qr do "add pagination to the API"` | Recognizes multi-step coding work, suggests handing off to Codex (`codex exec`) or Claude Code (`claude --permission-mode auto -p`) |
 
 **How classification works:**
 - The AI receives the task + project context (from `qr learn`, see below)
@@ -235,7 +235,7 @@ Run this command? [y/N] _
 $ qr do "refactor the auth module to use JWT tokens"
 🧠 This looks like a multi-step coding task.
 → Suggested: codex exec "refactor the auth module to use JWT tokens"
-  Or: claude --dangerously-skip-permissions -p "refactor the auth module to use JWT tokens"
+  Or: claude --permission-mode auto -p "refactor the auth module to use JWT tokens"
 Launch? [codex/claude/n] _
 ```
 
@@ -243,8 +243,8 @@ Launch? [codex/claude/n] _
 ```toml
 [do.agents]
 # Which coding agents are available for delegation
-codex = "codex exec"
-claude = "claude --dangerously-skip-permissions -p"
+codex = "codex --sandbox workspace-write --ask-for-approval on-request -c approvals_reviewer=auto_review exec"
+claude = "claude --permission-mode auto -p"
 default = "codex"  # which one to highlight first
 ```
 
