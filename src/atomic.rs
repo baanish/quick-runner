@@ -7,6 +7,8 @@
 //! concurrently: the project cache (read by `qr go` while the hourly cron
 //! rewrites it) and the user's shell rc file (corrupting it is a 5-alarm fire).
 
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::{
     ffi::OsString,
     fs,
@@ -19,6 +21,21 @@ use anyhow::{Context, Result};
 
 /// Atomically replace `path` with `contents`.
 pub fn write(path: &Path, contents: &[u8]) -> Result<()> {
+    write_impl(path, contents, WriteMode::PreserveExisting)
+}
+
+/// Atomically replace `path` with `contents`, creating the file with private
+/// permissions (`0600`) from the start on Unix.
+pub fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
+    write_impl(path, contents, WriteMode::Private)
+}
+
+enum WriteMode {
+    PreserveExisting,
+    Private,
+}
+
+fn write_impl(path: &Path, contents: &[u8], mode: WriteMode) -> Result<()> {
     // Follow a final symlink so we replace its target — as `fs::write` did —
     // rather than clobbering the symlink itself with a regular file. This keeps
     // dotfiles-managed symlinked rc files (e.g. `~/.zshrc` -> a versioned repo)
@@ -32,8 +49,7 @@ pub fn write(path: &Path, contents: &[u8]) -> Result<()> {
     }
 
     let tmp = temp_path(target);
-    let mut file = fs::File::create(&tmp)
-        .with_context(|| format!("Failed to create temp file {}", tmp.display()))?;
+    let mut file = create_temp_file(&tmp, &mode)?;
     let result = file.write_all(contents).and_then(|()| file.sync_all());
     drop(file);
     if let Err(error) = result {
@@ -45,12 +61,24 @@ pub fn write(path: &Path, contents: &[u8]) -> Result<()> {
     // installs a fresh inode, so without this an existing rc/config file's mode
     // (e.g. a 0600 config) would reset to the default. Fail loudly rather than
     // silently downgrade the mode.
-    if let Ok(metadata) = fs::metadata(target) {
-        if let Err(error) = fs::set_permissions(&tmp, metadata.permissions()) {
-            let _ = fs::remove_file(&tmp);
-            return Err(error).with_context(|| {
-                format!("Failed to preserve permissions on {}", target.display())
-            });
+    match mode {
+        WriteMode::PreserveExisting => {
+            if let Ok(metadata) = fs::metadata(target) {
+                if let Err(error) = fs::set_permissions(&tmp, metadata.permissions()) {
+                    let _ = fs::remove_file(&tmp);
+                    return Err(error).with_context(|| {
+                        format!("Failed to preserve permissions on {}", target.display())
+                    });
+                }
+            }
+        }
+        WriteMode::Private => {
+            #[cfg(unix)]
+            if let Err(error) = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600)) {
+                let _ = fs::remove_file(&tmp);
+                return Err(error)
+                    .with_context(|| format!("Failed to secure {}", target.display()));
+            }
         }
     }
 
@@ -59,6 +87,27 @@ pub fn write(path: &Path, contents: &[u8]) -> Result<()> {
         return Err(error).with_context(|| format!("Failed to replace {}", target.display()));
     }
     Ok(())
+}
+
+fn create_temp_file(path: &Path, mode: &WriteMode) -> Result<fs::File> {
+    #[cfg(unix)]
+    {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        if matches!(mode, WriteMode::Private) {
+            options.mode(0o600);
+        }
+        options
+            .open(path)
+            .with_context(|| format!("Failed to create temp file {}", path.display()))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = mode;
+        fs::File::create(path)
+            .with_context(|| format!("Failed to create temp file {}", path.display()))
+    }
 }
 
 /// Resolve a final symlink to its real target so an atomic replacement writes
@@ -136,8 +185,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn write_preserves_existing_file_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         write(&path, b"v1").unwrap();
@@ -147,6 +194,18 @@ mod tests {
 
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "atomic replace must preserve the file mode");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_creates_file_with_private_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        write_private(&path, b"secret = true").unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "private writes must create 0600 files");
     }
 
     #[test]
