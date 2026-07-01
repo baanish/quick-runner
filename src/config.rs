@@ -11,6 +11,8 @@ use crate::ai::providers::{AiProtocol, ProviderConfig};
 use crate::atomic;
 
 const DEFAULT_CONFIG: &str = include_str!("../config/default.toml");
+const LEGACY_CODEX_AGENT: &str = "codex exec";
+const LEGACY_CLAUDE_AGENT: &str = "claude --dangerously-skip-permissions -p";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -100,7 +102,9 @@ impl AppConfig {
         if path.exists() {
             let raw = fs::read_to_string(path)
                 .with_context(|| format!("Failed to read config file {}", path.display()))?;
-            Self::load_from_str(&raw)
+            let mut config = Self::load_from_str(&raw)?;
+            migrate_legacy_agent_defaults(path, &raw, &mut config)?;
+            Ok(config)
         } else {
             Self::load_from_str(DEFAULT_CONFIG)
         }
@@ -309,6 +313,85 @@ fn path_for_config(path: &Path) -> String {
     path.display().to_string()
 }
 
+fn migrate_legacy_agent_defaults(path: &Path, raw: &str, config: &mut AppConfig) -> Result<()> {
+    let mut new_codex = None;
+    let mut new_claude = None;
+
+    if config.do_config.agents.codex == LEGACY_CODEX_AGENT {
+        let value = default_codex_agent();
+        config.do_config.agents.codex = value.clone();
+        new_codex = Some(value);
+    }
+    if config.do_config.agents.claude == LEGACY_CLAUDE_AGENT {
+        let value = default_claude_agent();
+        config.do_config.agents.claude = value.clone();
+        new_claude = Some(value);
+    }
+
+    if new_codex.is_none() && new_claude.is_none() {
+        return Ok(());
+    }
+
+    if let Some(updated) =
+        rewrite_agent_defaults_in_toml(raw, new_codex.as_deref(), new_claude.as_deref())?
+    {
+        fs::write(path, updated)?;
+    }
+
+    Ok(())
+}
+
+fn rewrite_agent_defaults_in_toml(
+    raw: &str,
+    new_codex: Option<&str>,
+    new_claude: Option<&str>,
+) -> Result<Option<String>> {
+    let mut in_agents = false;
+    let mut changed = false;
+    let mut lines: Vec<String> = Vec::new();
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed == "[do.agents]" {
+            in_agents = true;
+            lines.push(line.to_string());
+            continue;
+        }
+        if in_agents && trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_agents = false;
+        }
+        if in_agents {
+            if let Some(value) = new_codex {
+                if trimmed.starts_with("codex") {
+                    let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+                    lines.push(format!("{indent}codex = \"{value}\""));
+                    changed = true;
+                    continue;
+                }
+            }
+            if let Some(value) = new_claude {
+                if trimmed.starts_with("claude") {
+                    let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+                    lines.push(format!("{indent}claude = \"{value}\""));
+                    changed = true;
+                    continue;
+                }
+            }
+        }
+        lines.push(line.to_string());
+    }
+
+    if !changed {
+        return Ok(None);
+    }
+
+    let mut result = lines.join("\n");
+    if raw.ends_with('\n') {
+        result.push('\n');
+    }
+    Ok(Some(result))
+}
+
 fn rewrite_stats_db_path_in_toml(raw: &str, new_value: &str) -> Result<Option<String>> {
     let mut in_stats = false;
     let mut changed = false;
@@ -383,11 +466,11 @@ pub fn default_config_str() -> &'static str {
 }
 
 fn default_codex_agent() -> String {
-    "codex exec".into()
+    "codex --sandbox workspace-write --ask-for-approval on-request -c approvals_reviewer=auto_review exec".into()
 }
 
 fn default_claude_agent() -> String {
-    "claude --dangerously-skip-permissions -p".into()
+    "claude --permission-mode auto -p".into()
 }
 
 impl Default for AgentConfig {
@@ -726,6 +809,88 @@ db_path = "{}"
 
         let config = AppConfig::load_from_env_with_path(new_dir.join("config.toml")).unwrap();
         assert_eq!(config.stats.db_path, "__default__");
+    }
+
+    #[test]
+    fn migrate_legacy_agent_defaults_rewrites_shipped_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+[general]
+default_run_mode = "output"
+[projects]
+roots = ["~/Development"]
+scan_depth = 2
+scan_interval_hours = 1
+[ai]
+protocol = "openai"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o"
+api_key = ""
+api_key_env = "OPENAI_API_KEY"
+[stats]
+enabled = false
+db_path = "__default__"
+[do.agents]
+codex = "codex exec"
+claude = "claude --dangerously-skip-permissions -p"
+"#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load_from_env_with_path(path.clone()).unwrap();
+
+        assert_eq!(config.do_config.agents.codex, default_codex_agent());
+        assert_eq!(config.do_config.agents.claude, default_claude_agent());
+
+        let updated = fs::read_to_string(&path).unwrap();
+        assert!(updated.contains(&format!("codex = \"{}\"", default_codex_agent())));
+        assert!(updated.contains(&format!("claude = \"{}\"", default_claude_agent())));
+        assert!(!updated.contains(LEGACY_CODEX_AGENT));
+        assert!(!updated.contains(LEGACY_CLAUDE_AGENT));
+    }
+
+    #[test]
+    fn migrate_legacy_agent_defaults_preserves_custom_agent_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let custom_codex = "codex exec --model gpt-5";
+        fs::write(
+            &path,
+            format!(
+                r#"
+[general]
+default_run_mode = "output"
+[projects]
+roots = ["~/Development"]
+scan_depth = 2
+scan_interval_hours = 1
+[ai]
+protocol = "openai"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o"
+api_key = ""
+api_key_env = "OPENAI_API_KEY"
+[stats]
+enabled = false
+db_path = "__default__"
+[do.agents]
+codex = "{custom_codex}"
+claude = "claude --dangerously-skip-permissions -p"
+"#
+            ),
+        )
+        .unwrap();
+
+        let config = AppConfig::load_from_env_with_path(path.clone()).unwrap();
+
+        assert_eq!(config.do_config.agents.codex, custom_codex);
+        assert_eq!(config.do_config.agents.claude, default_claude_agent());
+
+        let updated = fs::read_to_string(&path).unwrap();
+        assert!(updated.contains(&format!("codex = \"{custom_codex}\"")));
     }
 
     #[test]
