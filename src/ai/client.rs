@@ -57,11 +57,11 @@ impl AiClient {
     }
 
     pub fn execute_prompt(&self, system_prompt: &str, user_message: &str) -> Result<AiResponse> {
-        match self.send_prompt(&self.primary, system_prompt, user_message) {
+        match self.send_prompt(&self.primary, "primary", system_prompt, user_message) {
             Ok(response) => Ok(response),
             Err(primary_error) => {
                 if let Some(fallback) = &self.fallback {
-                    self.send_prompt(fallback, system_prompt, user_message)
+                    self.send_prompt(fallback, "fallback", system_prompt, user_message)
                         .map_err(|fallback_error| {
                             anyhow!(
                                 "Primary provider failed: {primary_error}. Fallback provider failed: {fallback_error}"
@@ -77,10 +77,11 @@ impl AiClient {
     fn send_prompt(
         &self,
         provider: &ProviderConfig,
+        keychain_role: &str,
         system_prompt: &str,
         user_message: &str,
     ) -> Result<AiResponse> {
-        let api_key = resolve_api_key(provider)?;
+        let api_key = resolve_api_key(provider, keychain_role)?;
         let url = endpoint_url(provider);
 
         let request = match provider.protocol {
@@ -126,7 +127,7 @@ impl AiClient {
     }
 }
 
-fn resolve_api_key(provider: &ProviderConfig) -> Result<String> {
+fn resolve_api_key(provider: &ProviderConfig, keychain_role: &str) -> Result<String> {
     // 1. explicit per-provider env var (highest-precedence override)
     if !provider.api_key_env.trim().is_empty() {
         if let Ok(value) = env::var(&provider.api_key_env) {
@@ -152,8 +153,9 @@ fn resolve_api_key(provider: &ProviderConfig) -> Result<String> {
     // 4. OS keychain — where `qr init` stores the key when you opt in. Checked
     //    last because it is only populated when the key is NOT in env or config,
     //    so the common paths never touch the keychain backend.
-    let account = crate::secret::account_for(&provider.api_key_env, well_known_env);
-    if let Some(value) = crate::secret::get(&account) {
+    if let Some(value) =
+        crate::secret::get_for_role(keychain_role, &provider.api_key_env, well_known_env)
+    {
         if !value.trim().is_empty() {
             return Ok(value);
         }
@@ -437,13 +439,16 @@ mod tests {
             std::env::set_var("OPENAI_API_KEY", "well-known-token");
         }
 
-        let api_key = resolve_api_key(&ProviderConfig {
-            protocol: AiProtocol::OpenAi,
-            base_url: "https://example.test/v1".into(),
-            model: "demo".into(),
-            api_key: "config-token".into(),
-            api_key_env: "CUSTOM_QR_TEST_AI_KEY".into(),
-        })
+        let api_key = resolve_api_key(
+            &ProviderConfig {
+                protocol: AiProtocol::OpenAi,
+                base_url: "https://example.test/v1".into(),
+                model: "demo".into(),
+                api_key: "config-token".into(),
+                api_key_env: "CUSTOM_QR_TEST_AI_KEY".into(),
+            },
+            "primary",
+        )
         .unwrap();
         assert_eq!(api_key, "custom-token");
 
@@ -462,13 +467,16 @@ mod tests {
             std::env::set_var("ANTHROPIC_API_KEY", "well-known-token");
         }
 
-        let api_key = resolve_api_key(&ProviderConfig {
-            protocol: AiProtocol::Anthropic,
-            base_url: "https://example.test".into(),
-            model: "claude-demo".into(),
-            api_key: "config-token".into(),
-            api_key_env: "CUSTOM_QR_TEST_ANTHROPIC_KEY".into(),
-        })
+        let api_key = resolve_api_key(
+            &ProviderConfig {
+                protocol: AiProtocol::Anthropic,
+                base_url: "https://example.test".into(),
+                model: "claude-demo".into(),
+                api_key: "config-token".into(),
+                api_key_env: "CUSTOM_QR_TEST_ANTHROPIC_KEY".into(),
+            },
+            "primary",
+        )
         .unwrap();
         assert_eq!(api_key, "well-known-token");
 
@@ -486,13 +494,16 @@ mod tests {
             std::env::remove_var("OPENAI_API_KEY");
         }
 
-        let api_key = resolve_api_key(&ProviderConfig {
-            protocol: AiProtocol::OpenAi,
-            base_url: "https://example.test/v1".into(),
-            model: "demo".into(),
-            api_key: "config-token".into(),
-            api_key_env: "CUSTOM_QR_TEST_AI_KEY".into(),
-        })
+        let api_key = resolve_api_key(
+            &ProviderConfig {
+                protocol: AiProtocol::OpenAi,
+                base_url: "https://example.test/v1".into(),
+                model: "demo".into(),
+                api_key: "config-token".into(),
+                api_key_env: "CUSTOM_QR_TEST_AI_KEY".into(),
+            },
+            "primary",
+        )
         .unwrap();
         assert_eq!(api_key, "config-token");
     }
