@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-07-02
+
 ### Added
 - `qr cost [--refresh]` — fetch a slim AI token-price snapshot from models.dev
   and show the resolved price for the configured model.
@@ -89,7 +91,4 @@ adheres to [Semantic Versioning](https://semver.org/).
 - The AI key can be stored in the OS keychain (`qr init` opt-in) instead of
   `config.toml`; keys resolve from env var → config → keychain.
 
-## [0.1.0]
-
-Initial implementation: `qr go`, `qr run`, `qr alias`, `qr stats`, `qr scan`,
-`qr init`, `qr do`, and `qr learn`.
+Initial public release.
