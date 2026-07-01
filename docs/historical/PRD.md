@@ -1,4 +1,8 @@
-# QuickRunner PRD
+# QuickRunner PRD (historical)
+
+> **Status:** Internal product-requirements notes from early development. For shipped
+> behavior, install steps, and config, use [`README.md`](../../README.md) as the source
+> of truth. This file is kept for design context only.
 
 ## Overview
 
@@ -16,7 +20,7 @@ QuickRunner (`qr`) is a blazing-fast, AI-augmented CLI tool that takes natural l
 | Component | Choice | Rationale |
 |---|---|---|
 | Language | **Rust** | Speed, safety, single binary distribution, great CLI ecosystem (clap, crossterm) |
-| AI Backend | **OpenAI-compatible + Anthropic-compatible** | User wires in any endpoint (FirePass, Cerebras, local, whatever) |
+| AI Backend | **OpenAI-compatible + Anthropic-compatible** | User wires in any endpoint (proxy, local Ollama, cloud provider, etc.) |
 | Config format | TOML | Rust-native, human-readable |
 | Config override | Environment variables | Every config key has a `QR_` env var equivalent for cloud shells |
 
@@ -43,8 +47,8 @@ Every subcommand has a 1-letter alias for speed:
 | `qr stats` | `qr s` | Stats |
 | `qr scan` | `qr x` | Rescan projects |
 | `qr init` | `qr i` | First-time setup |
-| `qr do` | `qr d` | Natural language → router (v2) |
-| `qr learn` | `qr l` | Learn current project (v2) |
+| `qr do` | `qr d` | Natural language → router |
+| `qr learn` | `qr l` | Learn current project |
 
 ## Features
 
@@ -53,12 +57,12 @@ Every subcommand has a 1-letter alias for speed:
 Navigate to a project directory by fuzzy name.
 
 ```
-$ qr go orion
-→ cd /Users/aanish/Development/orion-app
+$ qr go demo
+→ cd ~/projects/demo-app
 ```
 
 **How it works:**
-- On setup, user configures one or more project root directories (e.g., `~/Development`, `/Volumes/Delos/Development`)
+- On setup, user configures one or more project root directories (e.g., `~/projects`, `/workspace`)
 - An hourly cron job (or on-demand `qr scan`) walks those directories up to `scan_depth`
 - Detection heuristic (in priority order):
   1. `.git` present → project. Extract canonical name from git remote origin URL if available, fall back to directory name
@@ -71,7 +75,7 @@ $ qr go orion
 **Config example:**
 ```toml
 [projects]
-roots = ["~/Development", "/Volumes/Delos/Development"]
+roots = ["~/projects", "/workspace"]
 scan_depth = 2  # how deep to look for project dirs
 ```
 
@@ -81,22 +85,22 @@ scan_depth = 2  # how deep to look for project dirs
 - Multiple matches → interactive picker
 - No match → "No project matching '<name>' found. Run `qr scan` to refresh."
 
-### 2. Script Runner — `qr run <script> [mode]` / `qr r <script> [mode]`
+### 2. Script Runner — `qr run [--watch|--log|--output] <script>` / `qr r`
 
-Run scripts with three output modes:
+Run scripts with three output modes (mutually exclusive flags):
 
 | Mode | Command | Behavior |
 |---|---|---|
-| **watch** | `qr run watch <script>` | Run script, report only exit status (pass/fail) |
-| **log** | `qr run log <script>` | Run script, write full output to `./qr-log-<timestamp>.log` |
-| **output** | `qr run output <script>` | Run script, stream output to terminal (default passthrough) |
+| **watch** | `qr run --watch <script>` | Run script, report only exit status (pass/fail) |
+| **log** | `qr run --log <script>` | Run script, write full output to `./qr-log-<timestamp>.log` |
+| **output** | `qr run --output <script>` | Run script, stream output to terminal (default passthrough) |
 
-Default mode (bare `qr run <script>`) should be `output` — least surprising behavior.
+Default mode (bare `qr run <script>`) is `output` — least surprising behavior. Mode can also be set via `general.default_run_mode` in config.
 
 **Details:**
 - `watch`: Suppress stdout/stderr, show spinner, then ✅ exit 0 or ❌ exit N
-- `log`: Suppress terminal output, write to log file, show log path on completion
-- `output`: Just exec the script with inherited stdio (thin wrapper, near-zero overhead)
+- `log`: Tee output to a log file, show log path on completion
+- `output`: Exec the script with inherited stdio (thin wrapper, near-zero overhead)
 
 ### 3. Alias Manager — `qr alias` / `qr a`
 
@@ -127,7 +131,7 @@ When any feature has multiple options, present a numbered list (1-9) with **inst
 
 ```
 Multiple projects match "app":
-  1) orion-app
+  1) demo-app
   2) quick-runner
   3) webapp-template
 → Press 1-9:
@@ -144,13 +148,13 @@ Multiple projects match "app":
 Every command prints a compact stats line on completion:
 
 ```
-$ qr g orion
-→ cd /Users/aanish/Development/orion-app
+$ qr g demo
+→ cd ~/projects/demo-app
 ⚡ 12ms | no AI
 
 $ qr do "find TODOs"
 → grep -rn "TODO" . --include="*.rs"
-⚡ 342ms | 1.2k tok (in: 800 / out: 400) | FirePass | ~$0.001
+⚡ 342ms | 1.2k tok (in: 800 / out: 400) | openai | ~$0.001
 ```
 
 `qr stats` shows the aggregate view:
@@ -164,11 +168,11 @@ AI-assisted runs:   38
 Tokens used:     12,450 (in: 8,200 / out: 4,250)
 Total AI time:     14.2s (avg: 374ms)
 Est. cost:         $0.03
-Provider:          FirePass
+Provider:          openai
 ─────────────────
 ```
 
-**Storage:** Local SQLite database at `~/.config/qr/stats.db`
+**Storage:** Local SQLite database at `~/.qr/stats.db` (when stats are enabled)
 
 **Tracked per invocation:**
 - Timestamp
@@ -184,19 +188,19 @@ Provider:          FirePass
 AI is used sparingly — only where it adds clear value over deterministic logic.
 
 The AI layer supports two protocol families:
-- **OpenAI-compatible** (`/v1/chat/completions`) — covers FirePass, Cerebras, Groq, local Ollama, vLLM, etc.
+- **OpenAI-compatible** (`/v1/chat/completions`) — covers OpenAI, Groq, local Ollama, vLLM, etc.
 - **Anthropic-compatible** (`/v1/messages`) — covers Anthropic direct, AWS Bedrock, etc.
 
 User configures the base URL + API key. No provider-specific code.
 
 | Feature | AI Role |
 |---|---|
-| `qr go` | Fuzzy matching can be deterministic (no AI needed for v1) |
+| `qr go` | Fuzzy matching is deterministic (no AI) |
 | `qr run` | No AI needed |
-| `qr alias` | Optional: natural language → alias (e.g., `qr alias add "shortcut to rebuild docker"`) |
-| Future: `qr do <natural language>` | Translate intent to shell command (the big AI feature) |
+| `qr alias` | Optional: natural language → alias (future) |
+| `qr do <natural language>` | Translate intent to shell command or delegate to a coding agent |
 
-### `qr do <task>` / `qr d <task>` — v2
+### `qr do <task>` / `qr d <task>`
 
 Natural language → action router. Classifies intent, generates a command or delegates to a coding agent.
 
@@ -226,7 +230,7 @@ $ qr do "run tests"
 → cargo test
 Run this command? [y/N] y
 ... (output streams)
-⚡ 2.1s | 340 tok | FirePass | ~$0.0004
+⚡ 2.1s | 340 tok | openai | ~$0.0004
 
 $ qr do "delete all log files"
 → find . -name "*.log" -delete
@@ -248,21 +252,23 @@ claude = "claude --permission-mode auto -p"
 default = "codex"  # which one to highlight first
 ```
 
-### `qr learn` / `qr l` — v2
+### `qr learn` / `qr l`
 
 Learn the current project's structure and conventions so `qr do` has better context.
 
 ```
-$ cd ~/Development/orion-app
+$ cd ~/projects/demo-app
 $ qr learn
-📖 Learning orion-app...
+📖 Learning demo-app...
+  → Root: /home/dev/projects/demo-app
   → Detected: TypeScript + Next.js
   → Package manager: pnpm
-  → Test runner: vitest
-  → Build: next build
+  → Test: pnpm test
+  → Build: pnpm build
+  → Lint: pnpm lint
   → Scripts: dev, build, test, lint, db:push, db:studio
-  → Entry points: src/app/, src/server/
-✅ Saved to ~/.config/qr/projects/orion-app.toml
+  → Entry points: src/app/
+✅ Saved to /home/dev/projects/demo-app/.qr/profile.json
 ```
 
 **What it captures:**
@@ -270,35 +276,32 @@ $ qr learn
 - Available scripts / commands (npm scripts, Makefile targets, Justfile recipes, Cargo commands)
 - Test runner and build system
 - Key directories (src, tests, docs)
-- Git remote / branch info
 - Any `.qr.toml` overrides in the project root (user can manually add hints)
 
 **How it's used:**
 - `qr do` includes the learned project profile in its AI prompt, so it generates contextually correct commands (e.g., knows to use `pnpm` not `npm`, `vitest` not `jest`)
 - The delegate classifier also uses it — a project with complex architecture is more likely to get tasks classified as `delegate`
-- Profiles are cached per-project and refreshed on `qr learn` or when staleness is detected
+- Profiles live in the project tree and are refreshed on `qr learn`
 
-**Storage:** `~/.config/qr/projects/<project-name>.toml`
+**Storage:** `<project-root>/.qr/profile.json` (JSON, written atomically)
 
-```toml
-# Auto-generated by qr learn — orion-app
-[project]
-name = "orion-app"
-path = "/Users/aanish/Development/orion-app"
-language = "typescript"
-framework = "nextjs"
-package_manager = "pnpm"
-
-[commands]
-test = "pnpm test"
-build = "pnpm build"
-lint = "pnpm lint"
-dev = "pnpm dev"
-
-[structure]
-src = "src/"
-tests = "src/__tests__/"
-config = ["next.config.ts", "tsconfig.json"]
+```json
+{
+  "name": "demo-app",
+  "language": "typescript",
+  "framework": "nextjs",
+  "package_manager": "pnpm",
+  "test_command": "pnpm test",
+  "build_command": "pnpm build",
+  "lint_command": "pnpm lint",
+  "scripts": {
+    "dev": "pnpm dev",
+    "build": "pnpm build",
+    "test": "pnpm test",
+    "lint": "pnpm lint"
+  },
+  "entry_points": ["src/app/"]
+}
 ```
 
 **`.qr.toml` project-level overrides:**
@@ -307,13 +310,12 @@ Users can drop a `.qr.toml` in any project root to override or supplement what `
 
 ```toml
 # .qr.toml — checked into the repo
-[commands]
+test_command = "pnpm vitest run"
+prefer_agent = "claude"
+
+[scripts]
 deploy = "./scripts/deploy.sh"
 db = "pnpm db:studio"
-
-[hints]
-notes = "Always use --turbo flag for dev server"
-prefer_agent = "claude"  # for qr do delegate suggestions
 ```
 
 ## Project Structure
@@ -321,7 +323,7 @@ prefer_agent = "claude"  # for qr do delegate suggestions
 ```
 quick-runner/
 ├── Cargo.toml
-├── LICENSE                 # MIT or Apache 2.0
+├── LICENSE                 # MIT
 ├── README.md
 ├── src/
 │   ├── main.rs            # Entry point, CLI arg parsing
@@ -330,14 +332,16 @@ quick-runner/
 │   │   ├── go.rs          # Smart CD
 │   │   ├── run.rs         # Script runner
 │   │   ├── alias.rs       # Alias manager
-│   │   └── stats.rs       # Stats display
+│   │   ├── stats.rs       # Stats display
+│   │   ├── do.rs          # Natural language router
+│   │   └── learn.rs       # Project profiling
 │   ├── picker.rs          # Interactive 1-9 selector
 │   ├── config.rs          # TOML config loading
 │   ├── scanner.rs         # Project directory scanner
+│   ├── project_profile.rs # Learn + profile I/O
 │   ├── ai/
 │   │   ├── mod.rs
-│   │   ├── client.rs      # HTTP client for AI providers
-│   │   └── providers.rs   # FirePass, Cerebras adapters
+│   │   └── client.rs      # HTTP client for AI providers
 │   ├── stats_db.rs        # SQLite stats tracking
 │   └── shell.rs           # Shell detection, rc file ops
 ├── config/
@@ -348,32 +352,32 @@ quick-runner/
 
 ## Config Location
 
-`~/.config/qr/config.toml`
+`~/.qr/config.toml` (legacy `~/.config/qr/` on Linux and `~/Library/Application Support/qr/` on macOS are migrated automatically on first run)
 
 ```toml
 [general]
 default_run_mode = "output"
 
 [projects]
-roots = ["~/Development"]
+roots = ["~/projects"]
 scan_depth = 2
 scan_interval_hours = 1
 
 [ai]
 protocol = "openai"  # "openai" or "anthropic"
-base_url = "https://api.fireworks.ai/inference/v1"  # any OpenAI-compatible endpoint
-model = "accounts/fireworks/models/llama-v3p1-70b-instruct"
-api_key_env = "QR_API_KEY"  # env var name for the key; the key itself can be stored in the OS keychain (via qr init), an env var, or config.toml
+base_url = "https://api.openai.com/v1"
+model = ""
+api_key_env = "OPENAI_API_KEY"
 
 [ai.fallback]
 protocol = "openai"
-base_url = "https://api.cerebras.ai/v1"
-model = "llama3.1-70b"
-api_key_env = "QR_FALLBACK_API_KEY"
+base_url = "https://api.openai.com/v1"
+model = ""
+api_key_env = "OPENAI_API_KEY"
 
 [stats]
-enabled = true
-db_path = "~/.config/qr/stats.db"
+enabled = false
+db_path = "__default__"  # resolves to ~/.qr/stats.db
 ```
 
 ## Environment Variable Overrides
@@ -391,7 +395,7 @@ Every config key can be overridden via `QR_` prefixed env vars. This makes Quick
 | `ai.api_key_env` | (already an env var ref) | — |
 | `ai.fallback.base_url` | `QR_AI_FALLBACK_BASE_URL` | — |
 | `ai.fallback.model` | `QR_AI_FALLBACK_MODEL` | — |
-| `stats.enabled` | `QR_STATS_ENABLED` | `QR_STATS_ENABLED=false` |
+| `stats.enabled` | `QR_STATS_ENABLED` | `QR_STATS_ENABLED=true` |
 | `stats.db_path` | `QR_STATS_DB_PATH` | `QR_STATS_DB_PATH=/tmp/qr-stats.db` |
 
 Precedence: env var > config file > built-in default.
@@ -416,7 +420,7 @@ cargo build --release
 For `qr go` to actually change the parent shell's directory, we need a shell function wrapper:
 
 ```bash
-# Add to .zshrc
+# Add to .zshrc (qr init can append this for you)
 qr() {
   if [ "$1" = "go" ]; then
     local dir=$(command qr go "${@:2}" --print-path)
@@ -431,12 +435,12 @@ qr() {
 
 This is critical — a subprocess can't change the parent's cwd. The `qr` binary outputs the path, and the shell function does the actual `cd`.
 
-## v1 Scope
+## Shipped scope
 
-| Feature | In v1? |
+| Feature | Shipped? |
 |---|---|
 | `qr go <project>` | ✅ |
-| `qr run <mode> <script>` | ✅ |
+| `qr run [--watch\|--log\|--output] <script>` | ✅ |
 | `qr alias add/list/remove` | ✅ |
 | Interactive picker (1-9) | ✅ |
 | `qr stats` | ✅ |
@@ -444,13 +448,13 @@ This is critical — a subprocess can't change the parent's cwd. The `qr` binary
 | `qr init` (first-time setup) | ✅ |
 | `qr do <task>` (classify + route) | ✅ |
 | `qr learn` (project profiling) | ✅ |
-| AI-powered fuzzy matching | ❌ v2 (deterministic fuzzy in v1) |
-| Plugin system | ❌ v2+ |
+| AI-powered fuzzy matching for `qr go` | ❌ (deterministic fuzzy) |
+| Plugin system | ❌ future |
 
 ## Success Metrics
 
 - `qr go` resolves in <50ms (cached, no AI)
-- `qr run watch` adds <10ms overhead vs. raw execution
+- `qr run --watch` adds <10ms overhead vs. raw execution
 - Binary size <10MB
 - Zero runtime dependencies (single static binary)
 - Works on macOS arm64 + Linux x86_64 at minimum
