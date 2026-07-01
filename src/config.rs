@@ -8,6 +8,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 use crate::ai::providers::{AiProtocol, ProviderConfig};
+use crate::atomic;
 
 const DEFAULT_CONFIG: &str = include_str!("../config/default.toml");
 
@@ -89,16 +90,20 @@ impl AppConfig {
     }
 
     pub fn load_from_env_with_path(path: PathBuf) -> Result<Self> {
-        let mut config = if path.exists() {
-            let raw = fs::read_to_string(&path)
-                .with_context(|| format!("Failed to read config file {}", path.display()))?;
-            Self::load_from_str(&raw)?
-        } else {
-            Self::load_from_str(DEFAULT_CONFIG)?
-        };
-
+        let mut config = Self::load_file_without_env(&path)?;
         apply_env_overrides(&mut config)?;
         Ok(config)
+    }
+
+    /// Parse `config.toml` on disk without applying `QR_*` env overrides.
+    pub fn load_file_without_env(path: &Path) -> Result<Self> {
+        if path.exists() {
+            let raw = fs::read_to_string(path)
+                .with_context(|| format!("Failed to read config file {}", path.display()))?;
+            Self::load_from_str(&raw)
+        } else {
+            Self::load_from_str(DEFAULT_CONFIG)
+        }
     }
 
     pub fn ensure_parent_dirs(&self) -> Result<()> {
@@ -267,7 +272,7 @@ fn rewrite_legacy_paths_in_config(
     };
 
     if let Some(updated) = rewrite_stats_db_path_in_toml(&raw, &new_value)? {
-        fs::write(config_path, updated)?;
+        atomic::write_private(config_path, updated.as_bytes())?;
     }
 
     Ok(())
@@ -369,7 +374,7 @@ pub fn write_default_config_if_missing(path: &Path) -> Result<bool> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(path, DEFAULT_CONFIG)?;
+    atomic::write_private(path, DEFAULT_CONFIG.as_bytes())?;
     Ok(true)
 }
 

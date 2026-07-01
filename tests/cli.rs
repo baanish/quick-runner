@@ -11,7 +11,7 @@ use std::{
     thread,
 };
 
-use quick_runner::stats_db::StatsDb;
+use quick_runner::{config::AppConfig, stats_db::StatsDb};
 
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -19,7 +19,12 @@ fn env_lock() -> &'static Mutex<()> {
 }
 
 fn clear_test_env() {
-    for key in ["QR_CONFIG_DIR", "QR_TEST_AI_KEY"] {
+    for key in [
+        "QR_CONFIG_DIR",
+        "QR_TEST_AI_KEY",
+        "QR_TEST_USE_MOCK_KEYCHAIN",
+        "QR_SCAN_DEPTH",
+    ] {
         unsafe {
             std::env::remove_var(key);
         }
@@ -260,7 +265,7 @@ db_path = "__default__"
 }
 
 #[test]
-fn init_collects_ai_provider_settings_and_writes_secure_config() {
+fn init_stores_keys_in_config_with_explicit_notice_and_private_permissions() {
     let _guard = env_lock().lock().unwrap();
     clear_test_env();
     let tmp = tempfile::tempdir().unwrap();
@@ -280,11 +285,12 @@ fn init_collects_ai_provider_settings_and_writes_secure_config() {
         .arg("--no-prices")
         .write_stdin(format!(
             "{root}\n\nopenai-compatible\n\nopenai-model\nconfig-primary-key\n\n\
-n\ny\nanthropic-compatible\n\nclaude-fallback\nconfig-fallback-key\nFALLBACK_SECRET\n",
+n\ny\nanthropic-compatible\n\nclaude-fallback\nconfig-fallback-key\nFALLBACK_SECRET\nn\n",
             root = project_root.display()
         ))
         .assert()
         .success()
+        .stdout(contains("API key will be stored in config.toml"))
         .stdout(contains("created"))
         .stdout(contains("initial scan found"));
 
@@ -308,6 +314,155 @@ n\ny\nanthropic-compatible\n\nclaude-fallback\nconfig-fallback-key\nFALLBACK_SEC
 
     unsafe {
         std::env::remove_var("QR_CONFIG_DIR");
+    }
+}
+
+#[test]
+fn init_recovers_from_corrupt_config_and_rewrites_valid_config() {
+    let _guard = env_lock().lock().unwrap();
+    clear_test_env();
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_dir = tmp.path().join("cfg");
+    let project_root = tmp.path().join("projects");
+    fs::create_dir_all(&cfg_dir).unwrap();
+    fs::create_dir_all(&project_root).unwrap();
+    fs::write(cfg_dir.join("config.toml"), "[broken").unwrap();
+
+    unsafe {
+        std::env::set_var("QR_CONFIG_DIR", &cfg_dir);
+    }
+
+    Command::cargo_bin("qr")
+        .unwrap()
+        .arg("init")
+        .arg("--no-shell-wrapper")
+        .arg("--no-cron")
+        .arg("--no-prices")
+        .write_stdin(format!(
+            "{root}\n\nopenai-compatible\n\nopenai-model\nrecovered-primary-key\n\nn\nn\n",
+            root = project_root.display()
+        ))
+        .assert()
+        .success()
+        .stdout(contains("created"))
+        .stdout(contains("initial scan found"));
+
+    let config_path = cfg_dir.join("config.toml");
+    let config = AppConfig::load_from_env_with_path(config_path.clone()).unwrap();
+    assert_eq!(
+        config.projects.roots,
+        vec![project_root.display().to_string()]
+    );
+    assert_eq!(config.ai.model, "openai-model");
+    assert_eq!(config.ai.api_key, "recovered-primary-key");
+    assert!(config.ai.fallback.is_none());
+    assert!(!fs::read_to_string(config_path).unwrap().contains("[broken"));
+
+    unsafe {
+        std::env::remove_var("QR_CONFIG_DIR");
+    }
+}
+
+#[test]
+fn init_stores_fallback_key_in_keychain_when_requested() {
+    let _guard = env_lock().lock().unwrap();
+    clear_test_env();
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_dir = tmp.path().join("cfg");
+    let project_root = tmp.path().join("projects");
+    fs::create_dir_all(&cfg_dir).unwrap();
+    fs::create_dir_all(&project_root).unwrap();
+
+    unsafe {
+        std::env::set_var("QR_CONFIG_DIR", &cfg_dir);
+        std::env::set_var("QR_TEST_USE_MOCK_KEYCHAIN", "1");
+    }
+
+    Command::cargo_bin("qr")
+        .unwrap()
+        .arg("init")
+        .arg("--no-shell-wrapper")
+        .arg("--no-cron")
+        .arg("--no-prices")
+        .write_stdin(format!(
+            "{root}\n\nopenai-compatible\n\nopenai-model\nprimary-secret\n\n\
+y\ny\nopenai-compatible\n\nfallback-model\nfallback-secret\n\ny\n",
+            root = project_root.display()
+        ))
+        .assert()
+        .success()
+        .stdout(contains(
+            "stored API key in the OS keychain (account \"primary:OPENAI_API_KEY\")",
+        ))
+        .stdout(contains(
+            "stored API key in the OS keychain (account \"fallback:OPENAI_API_KEY\")",
+        ));
+
+    let raw = fs::read_to_string(cfg_dir.join("config.toml")).unwrap();
+    assert_eq!(raw.matches("api_key = \"\"").count(), 2);
+    assert!(!raw.contains("primary-secret"));
+    assert!(!raw.contains("fallback-secret"));
+    assert!(raw.contains("api_key_env = \"OPENAI_API_KEY\""));
+    assert!(raw.contains("model = \"fallback-model\""));
+
+    unsafe {
+        std::env::remove_var("QR_CONFIG_DIR");
+        std::env::remove_var("QR_TEST_USE_MOCK_KEYCHAIN");
+    }
+}
+
+#[test]
+fn init_keeps_valid_config_when_env_override_is_invalid() {
+    let _guard = env_lock().lock().unwrap();
+    clear_test_env();
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_dir = tmp.path().join("cfg");
+    fs::create_dir_all(&cfg_dir).unwrap();
+    fs::write(
+        cfg_dir.join("config.toml"),
+        r#"[general]
+default_run_mode = "output"
+
+[projects]
+roots = ["~/Development"]
+scan_depth = 2
+scan_interval_hours = 1
+
+[ai]
+protocol = "openai"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o"
+api_key = "keep-me"
+api_key_env = "OPENAI_API_KEY"
+
+[stats]
+enabled = false
+db_path = "__default__"
+"#,
+    )
+    .unwrap();
+
+    unsafe {
+        std::env::set_var("QR_CONFIG_DIR", &cfg_dir);
+        std::env::set_var("QR_SCAN_DEPTH", "not-a-number");
+    }
+
+    Command::cargo_bin("qr")
+        .unwrap()
+        .args(["init", "--no-shell-wrapper", "--no-cron", "--no-prices"])
+        .write_stdin("\n")
+        .assert()
+        .failure()
+        .stdout(contains("config already present"))
+        .stdout(contains("recreating").not())
+        .stderr(contains("QR_SCAN_DEPTH"));
+
+    let raw = fs::read_to_string(cfg_dir.join("config.toml")).unwrap();
+    assert!(raw.contains("api_key = \"keep-me\""));
+
+    unsafe {
+        std::env::remove_var("QR_CONFIG_DIR");
+        std::env::remove_var("QR_SCAN_DEPTH");
     }
 }
 

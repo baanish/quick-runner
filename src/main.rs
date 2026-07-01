@@ -1,5 +1,5 @@
 use std::{
-    env, fs,
+    env,
     io::{self, Write},
     process::{Command, ExitCode},
     time::Instant,
@@ -10,7 +10,7 @@ use clap::{Args, Parser, Subcommand};
 use quick_runner::{
     ai,
     ai::providers::AiProtocol,
-    commands,
+    atomic, commands,
     commands::{alias::AliasCommand, config_cmd::ConfigArgs, go::GoResult},
     config::{
         AgentConfig, AiConfig, AppConfig, DoConfig, FallbackAiConfig, GeneralConfig,
@@ -19,8 +19,6 @@ use quick_runner::{
     pricing, scanner, secret, shell,
     stats_db::{CommandStats, StatsDb},
 };
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 
 #[derive(Parser)]
 #[command(name = "qr", version, about = "QuickRunner")]
@@ -143,6 +141,10 @@ fn run() -> Result<ExitCode> {
             commands::learn::print_summary(&result);
             Ok(ExitCode::SUCCESS)
         }
+        Commands::Init(args) => {
+            execute_init(args)?;
+            Ok(ExitCode::SUCCESS)
+        }
         command => run_with_config(command),
     }
 }
@@ -217,10 +219,8 @@ fn run_with_config(command: Commands) -> Result<ExitCode> {
             );
             Ok(ExitCode::SUCCESS)
         }
-        Commands::Init(args) => {
-            execute_init(&config, args)?;
-            stats.command_type = "__skip_stats__".into();
-            Ok(ExitCode::SUCCESS)
+        Commands::Init(_) => {
+            unreachable!("config-independent commands are dispatched before config load")
         }
         Commands::Cost { refresh } => {
             run_cost(&config, refresh)?;
@@ -277,11 +277,22 @@ fn record_stats(config: &AppConfig, stats: &CommandStats) -> Result<()> {
     db.record(stats)
 }
 
-fn execute_init(config: &AppConfig, args: InitArgs) -> Result<()> {
+fn execute_init(args: InitArgs) -> Result<()> {
     let config_path = config_file_path();
-    let is_new = !config_path.exists();
+    let existing = if config_path.exists() {
+        Some(AppConfig::load_file_without_env(&config_path))
+    } else {
+        None
+    };
+    let needs_recreate = !config_path.exists() || existing.as_ref().is_some_and(Result::is_err);
 
-    if is_new {
+    let effective_config = if needs_recreate {
+        if let Some(Err(error)) = existing {
+            println!(
+                "config at {} is invalid; recreating it ({error:#})",
+                config_path.display()
+            );
+        }
         // Ask for project roots interactively
         println!("Welcome to QuickRunner! Let's set up your project roots.");
         println!("Enter directories to scan for projects (one per line, empty line to finish):");
@@ -328,21 +339,12 @@ fn execute_init(config: &AppConfig, args: InitArgs) -> Result<()> {
             },
         })?;
 
-        if let Some(parent) = config_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(&config_path, &config_content)?;
-        restrict_config_permissions(&config_path)?;
+        atomic::write_private(&config_path, config_content.as_bytes())?;
         println!("created {}", config_path.display());
+        AppConfig::load_from_env_with_path(config_path.clone())?
     } else {
         println!("config already present at {}", config_path.display());
-    }
-
-    // Reload config in case we just wrote a new one with custom roots
-    let effective_config = if is_new {
-        AppConfig::load()?
-    } else {
-        config.clone()
+        AppConfig::load_from_env_with_path(config_path.clone())?
     };
 
     if !args.no_shell_wrapper {
@@ -387,7 +389,7 @@ fn prompt_provider_fields(label: &str) -> Result<(AiProtocol, String, String, St
 
 fn prompt_ai_config(label: &str) -> Result<AiConfig> {
     let (protocol, base_url, model, api_key, api_key_env) = prompt_provider_fields(label)?;
-    let api_key = maybe_store_key_in_keychain(protocol, &api_key_env, api_key)?;
+    let api_key = maybe_store_key_in_keychain("primary", protocol, &api_key_env, api_key)?;
 
     let fallback = if prompt_bool("Configure a fallback provider?", false)? {
         Some(prompt_fallback_ai_config()?)
@@ -441,6 +443,7 @@ fn run_cost(config: &AppConfig, refresh: bool) -> Result<()> {
 /// keychain, otherwise the key itself (config storage is the fallback when the
 /// user declines or the keychain is unavailable).
 fn maybe_store_key_in_keychain(
+    role: &str,
     protocol: AiProtocol,
     api_key_env: &str,
     api_key: String,
@@ -449,9 +452,10 @@ fn maybe_store_key_in_keychain(
         "Store the API key in your OS keychain (recommended; keeps it out of config.toml)?",
         true,
     )? {
+        println!("API key will be stored in config.toml");
         return Ok(api_key);
     }
-    let account = secret::account_for(api_key_env, protocol.default_api_key_env());
+    let account = secret::account_for(role, api_key_env, protocol.default_api_key_env());
     match secret::set(&account, &api_key) {
         Ok(()) => {
             println!("✔ stored API key in the OS keychain (account \"{account}\")");
@@ -461,6 +465,7 @@ fn maybe_store_key_in_keychain(
             println!(
                 "⚠ could not use the keychain ({error}); storing the key in config.toml instead"
             );
+            println!("API key will be stored in config.toml");
             Ok(api_key)
         }
     }
@@ -468,6 +473,7 @@ fn maybe_store_key_in_keychain(
 
 fn prompt_fallback_ai_config() -> Result<FallbackAiConfig> {
     let (protocol, base_url, model, api_key, api_key_env) = prompt_provider_fields("fallback")?;
+    let api_key = maybe_store_key_in_keychain("fallback", protocol, &api_key_env, api_key)?;
     Ok(FallbackAiConfig {
         protocol,
         base_url,
@@ -553,55 +559,44 @@ fn prompt(label: &str) -> Result<Option<String>> {
     Ok(Some(line.trim().to_string()))
 }
 
-fn restrict_config_permissions(path: &std::path::Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        let permissions = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(path, permissions)?;
+fn install_cron() -> Result<()> {
+    let exe = env::current_exe().context("Could not resolve qr binary path")?;
+    let cron_line = shell::cron_line(&exe);
+    let output = match Command::new("crontab").arg("-l").output() {
+        Ok(output) => output,
+        // Cannot spawn `crontab` (binary missing on minimal images, etc.) — nothing
+        // to overwrite, so fall back to printing the line for manual install.
+        Err(error) => {
+            print_manual_cron_hint(&cron_line);
+            eprintln!("warning: could not run `crontab -l`: {error:#}");
+            return Ok(());
+        }
+    };
+    let existing = shell::crontab_contents_from_list_output(&output)?;
+
+    let Some(merged) = shell::merge_cron_entry(&existing, &cron_line) else {
+        println!("cron entry already present");
+        return Ok(());
+    };
+
+    let mut child = Command::new("crontab")
+        .arg("-")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .context("Failed to update crontab")?;
+    child.stdin.take().unwrap().write_all(merged.as_bytes())?;
+    let status = child.wait()?;
+    if !status.success() {
+        return Err(anyhow!("crontab rejected the new entry"));
     }
+    println!("installed hourly scan cron");
 
     Ok(())
 }
 
-fn install_cron() -> Result<()> {
-    let exe = env::current_exe().context("Could not resolve qr binary path")?;
-    let cron_line = shell::cron_line(&exe);
-    let current = Command::new("crontab").arg("-l").output();
-
-    match current {
-        Ok(output) => {
-            let existing = String::from_utf8_lossy(&output.stdout);
-            if existing.contains(&cron_line) {
-                println!("cron entry already present");
-                return Ok(());
-            }
-
-            let mut merged = existing.to_string();
-            if !merged.ends_with('\n') && !merged.is_empty() {
-                merged.push('\n');
-            }
-            merged.push_str(&cron_line);
-            merged.push('\n');
-
-            let mut child = Command::new("crontab")
-                .arg("-")
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-                .context("Failed to update crontab")?;
-            child.stdin.take().unwrap().write_all(merged.as_bytes())?;
-            let status = child.wait()?;
-            if !status.success() {
-                return Err(anyhow!("crontab rejected the new entry"));
-            }
-            println!("installed hourly scan cron");
-        }
-        Err(_) => {
-            println!("Could not update crontab automatically. Add this entry manually:");
-            println!("{}", cron_line);
-        }
-    }
-
-    Ok(())
+fn print_manual_cron_hint(cron_line: &str) {
+    println!("Could not update crontab automatically. Add this entry manually:");
+    println!("{cron_line}");
 }
 
 fn print_go_result(result: &GoResult, print_path: bool) -> Result<()> {
