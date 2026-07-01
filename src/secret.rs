@@ -10,10 +10,30 @@ use std::sync::Once;
 
 const SERVICE: &str = "quick-runner";
 
-/// Keychain account name for an API key: the custom env-var name when one is
-/// configured, otherwise `default` (the protocol's well-known env var). Keeps
-/// `qr init`'s store and the AI client's lookup in agreement.
-pub fn account_for(api_key_env: &str, default: &str) -> String {
+/// Keychain account name for an API key. `role` distinguishes primary vs fallback
+/// when both use the same env-var name (e.g. two openai-compatible endpoints).
+pub fn account_for(role: &str, api_key_env: &str, default: &str) -> String {
+    let base = if api_key_env.trim().is_empty() {
+        default.to_string()
+    } else {
+        api_key_env.to_string()
+    };
+    format!("{role}:{base}")
+}
+
+/// Look up a role-scoped keychain entry, falling back to the legacy bare account
+/// for primary keys stored before role-prefixing shipped.
+pub fn get_for_role(role: &str, api_key_env: &str, default: &str) -> Option<String> {
+    get(&account_for(role, api_key_env, default)).or_else(|| {
+        if role == "primary" {
+            get(&legacy_account(api_key_env, default))
+        } else {
+            None
+        }
+    })
+}
+
+fn legacy_account(api_key_env: &str, default: &str) -> String {
     if api_key_env.trim().is_empty() {
         default.to_string()
     } else {
@@ -48,4 +68,25 @@ fn configure_test_backend() {
             keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn primary_and_fallback_accounts_differ_when_env_name_matches() {
+        assert_eq!(
+            account_for("primary", "", "OPENAI_API_KEY"),
+            "primary:OPENAI_API_KEY"
+        );
+        assert_eq!(
+            account_for("fallback", "", "OPENAI_API_KEY"),
+            "fallback:OPENAI_API_KEY"
+        );
+        assert_ne!(
+            account_for("primary", "", "OPENAI_API_KEY"),
+            account_for("fallback", "", "OPENAI_API_KEY")
+        );
+    }
 }
