@@ -175,14 +175,15 @@ pub fn config_dir() -> PathBuf {
     dir
 }
 
-/// Move config files from the legacy directory into `new_dir` when the new
-/// location has no `config.toml` yet. Returns `true` when files were migrated.
+/// Move config files from the legacy directory into `new_dir`. Returns `true`
+/// when at least one file was migrated. Migration is retried on later runs until
+/// the legacy directory is empty and the `.migrated-from-legacy` marker is written.
 pub fn migrate_legacy_config(new_dir: &Path, legacy_dir: Option<&Path>) -> Result<bool> {
     let Some(legacy_dir) = legacy_dir else {
         return Ok(false);
     };
 
-    if new_dir.join("config.toml").exists() {
+    if new_dir.join(".migrated-from-legacy").exists() {
         return Ok(false);
     }
 
@@ -190,7 +191,7 @@ pub fn migrate_legacy_config(new_dir: &Path, legacy_dir: Option<&Path>) -> Resul
         return Ok(false);
     }
 
-    let legacy_files: Vec<_> = fs::read_dir(legacy_dir)?
+    let mut legacy_files: Vec<_> = fs::read_dir(legacy_dir)?
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
         .collect();
@@ -201,21 +202,35 @@ pub fn migrate_legacy_config(new_dir: &Path, legacy_dir: Option<&Path>) -> Resul
 
     fs::create_dir_all(new_dir)?;
 
+    // Move data files before config.toml so a mid-loop failure can be retried.
+    legacy_files.sort_by_key(|entry| entry.file_name() == "config.toml");
+
+    let mut moved_any = false;
     for entry in &legacy_files {
         let src = entry.path();
         let dest = new_dir.join(entry.file_name());
         if dest.exists() {
+            if src.is_file() {
+                fs::remove_file(&src)?;
+                moved_any = true;
+            }
             continue;
         }
         if fs::rename(&src, &dest).is_err() {
             fs::copy(&src, &dest)?;
             fs::remove_file(&src)?;
         }
+        moved_any = true;
     }
 
-    if fs::read_dir(legacy_dir)?.next().is_none() {
-        let _ = fs::remove_dir(legacy_dir);
+    if fs::read_dir(legacy_dir)?.next().is_some() {
+        anyhow::bail!(
+            "legacy config directory {} still has files after migration attempt",
+            legacy_dir.display()
+        );
     }
+
+    let _ = fs::remove_dir(legacy_dir);
 
     let config_path = new_dir.join("config.toml");
     if config_path.exists() {
@@ -227,12 +242,12 @@ pub fn migrate_legacy_config(new_dir: &Path, legacy_dir: Option<&Path>) -> Resul
         legacy_dir.display().to_string(),
     )?;
 
-    Ok(true)
+    Ok(moved_any)
 }
 
 fn rewrite_legacy_paths_in_config(config_path: &Path, legacy_dir: &Path) -> Result<()> {
     let raw = fs::read_to_string(config_path)?;
-    let mut config = AppConfig::load_from_str(&raw)?;
+    let config = AppConfig::load_from_str(&raw)?;
 
     if config.stats.db_path.is_empty() || config.stats.db_path == "__default__" {
         return Ok(());
@@ -241,11 +256,47 @@ fn rewrite_legacy_paths_in_config(config_path: &Path, legacy_dir: &Path) -> Resu
     let db_path = expand_path(&config.stats.db_path);
     let default_legacy_db = legacy_dir.join("stats.db");
     if path_is_under(&db_path, legacy_dir) || db_path == default_legacy_db {
-        config.stats.db_path = "__default__".into();
-        fs::write(config_path, toml::to_string_pretty(&config)?)?;
+        if let Some(updated) = rewrite_stats_db_path_in_toml(&raw, "__default__")? {
+            fs::write(config_path, updated)?;
+        }
     }
 
     Ok(())
+}
+
+fn rewrite_stats_db_path_in_toml(raw: &str, new_value: &str) -> Result<Option<String>> {
+    let mut in_stats = false;
+    let mut changed = false;
+    let mut lines: Vec<String> = Vec::new();
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed == "[stats]" {
+            in_stats = true;
+            lines.push(line.to_string());
+            continue;
+        }
+        if in_stats && trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_stats = false;
+        }
+        if in_stats && trimmed.starts_with("db_path") {
+            let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+            lines.push(format!("{indent}db_path = \"{new_value}\""));
+            changed = true;
+            continue;
+        }
+        lines.push(line.to_string());
+    }
+
+    if !changed {
+        return Ok(None);
+    }
+
+    let mut result = lines.join("\n");
+    if raw.ends_with('\n') {
+        result.push('\n');
+    }
+    Ok(Some(result))
 }
 
 fn path_is_under(path: &Path, parent: &Path) -> bool {
@@ -580,21 +631,17 @@ db_path = "/tmp/file.db"
     }
 
     #[test]
-    fn migrate_legacy_config_skips_when_new_config_exists() {
+    fn migrate_legacy_config_skips_when_already_migrated() {
         let root = tempfile::tempdir().unwrap();
         let legacy = root.path().join("legacy");
         let new_dir = root.path().join("new");
         fs::create_dir_all(&legacy).unwrap();
         fs::create_dir_all(&new_dir).unwrap();
         fs::write(legacy.join("config.toml"), "legacy").unwrap();
-        fs::write(new_dir.join("config.toml"), "new").unwrap();
+        fs::write(new_dir.join(".migrated-from-legacy"), "done").unwrap();
 
         let migrated = migrate_legacy_config(&new_dir, Some(&legacy)).unwrap();
         assert!(!migrated);
-        assert_eq!(
-            fs::read_to_string(new_dir.join("config.toml")).unwrap(),
-            "new"
-        );
         assert!(legacy.join("config.toml").exists());
     }
 
@@ -634,5 +681,46 @@ db_path = "{}"
 
         let config = AppConfig::load_from_env_with_path(new_dir.join("config.toml")).unwrap();
         assert_eq!(config.stats.db_path, "__default__");
+    }
+
+    #[test]
+    fn rewrite_stats_db_path_preserves_comments_and_formatting() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join("legacy");
+        let config_path = root.path().join("config.toml");
+        let legacy_db = legacy.join("stats.db");
+        fs::write(
+            &config_path,
+            format!(
+                r#"# my custom config
+[general]
+default_run_mode = "output"
+[projects]
+roots = ["~/Code"]
+scan_depth = 2
+scan_interval_hours = 1
+[ai]
+protocol = "openai"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o"
+api_key = ""
+api_key_env = "OPENAI_API_KEY"
+[stats]
+enabled = true
+# keep stats near the legacy db
+db_path = "{}"
+"#,
+                legacy_db.display()
+            ),
+        )
+        .unwrap();
+
+        rewrite_legacy_paths_in_config(&config_path, &legacy).unwrap();
+
+        let updated = fs::read_to_string(&config_path).unwrap();
+        assert!(updated.contains("# my custom config"));
+        assert!(updated.contains("# keep stats near the legacy db"));
+        assert!(updated.contains("db_path = \"__default__\""));
+        assert!(!updated.contains(&legacy_db.display().to_string()));
     }
 }
