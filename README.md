@@ -27,10 +27,11 @@ exec $SHELL              # reload so the `qr go` wrapper takes effect
 
 ## Config
 
-Run `qr config path` to print the exact location. It is platform-specific:
+Run `qr config path` to print the exact location:
 
-- macOS: `~/Library/Application Support/qr/config.toml`
-- Linux: `~/.config/qr/config.toml` (or `$XDG_CONFIG_HOME/qr/`)
+- `~/.qr/config.toml` on all platforms
+
+On first run after upgrading, QuickRunner automatically migrates an existing config from the legacy location (`~/.config/qr/` on Linux, `~/Library/Application Support/qr/` on macOS) into `~/.qr/`. Set `QR_CONFIG_DIR` to override the directory (used in tests and CI).
 
 Defaults come from [`config/default.toml`](config/default.toml). Environment variables (`QR_*`) override every config key — e.g. `QR_PROJECT_ROOTS` (colon-separated), `QR_SCAN_DEPTH`, `QR_AI_MODEL`, `QR_STATS_ENABLED`; see `config/default.toml` for the full list.
 
