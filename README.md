@@ -18,15 +18,9 @@ QuickRunner (`qr`) is a fast Rust CLI for common developer shell workflows: jump
 ## Install
 
 ```bash
-cargo install quick-runner
+cargo install --path .   # or: cargo build --release  (binary at target/release/qr)
 qr init                  # config + shell wrapper + initial scan
 exec $SHELL              # reload so the `qr go` wrapper takes effect
-```
-
-From a source checkout:
-
-```bash
-cargo install --path .   # or: cargo build --release  (binary at target/release/qr)
 ```
 
 `qr init` appends a wrapper function to your shell rc file so `qr go` can change the parent shell's directory — a child process can't do that on its own. The wrapper calls `qr go --print-path` and runs the `cd` in your shell.
