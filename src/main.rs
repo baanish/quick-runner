@@ -566,10 +566,16 @@ fn restrict_config_permissions(path: &std::path::Path) -> Result<()> {
 fn install_cron() -> Result<()> {
     let exe = env::current_exe().context("Could not resolve qr binary path")?;
     let cron_line = shell::cron_line(&exe);
-    let output = Command::new("crontab")
-        .arg("-l")
-        .output()
-        .context("Failed to run `crontab -l`")?;
+    let output = match Command::new("crontab").arg("-l").output() {
+        Ok(output) => output,
+        // Cannot spawn `crontab` (binary missing on minimal images, etc.) — nothing
+        // to overwrite, so fall back to printing the line for manual install.
+        Err(error) => {
+            print_manual_cron_hint(&cron_line);
+            eprintln!("warning: could not run `crontab -l`: {error:#}");
+            return Ok(());
+        }
+    };
     let existing = shell::crontab_contents_from_list_output(&output)?;
 
     let Some(merged) = shell::merge_cron_entry(&existing, &cron_line) else {
@@ -590,6 +596,11 @@ fn install_cron() -> Result<()> {
     println!("installed hourly scan cron");
 
     Ok(())
+}
+
+fn print_manual_cron_hint(cron_line: &str) {
+    println!("Could not update crontab automatically. Add this entry manually:");
+    println!("{cron_line}");
 }
 
 fn print_go_result(result: &GoResult, print_path: bool) -> Result<()> {
