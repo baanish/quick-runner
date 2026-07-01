@@ -378,11 +378,11 @@ pub fn default_config_str() -> &'static str {
 }
 
 fn default_codex_agent() -> String {
-    "codex exec".into()
+    "codex --sandbox workspace-write --ask-for-approval on-request -c approvals_reviewer=auto_review exec".into()
 }
 
 fn default_claude_agent() -> String {
-    "claude --dangerously-skip-permissions -p".into()
+    "claude --permission-mode auto -p".into()
 }
 
 impl Default for AgentConfig {
