@@ -1,5 +1,5 @@
 use std::{
-    env, fs,
+    env,
     io::{self, Write},
     process::{Command, ExitCode},
     time::Instant,
@@ -10,7 +10,7 @@ use clap::{Args, Parser, Subcommand};
 use quick_runner::{
     ai,
     ai::providers::AiProtocol,
-    commands,
+    atomic, commands,
     commands::{alias::AliasCommand, config_cmd::ConfigArgs, go::GoResult},
     config::{
         AgentConfig, AiConfig, AppConfig, DoConfig, FallbackAiConfig, GeneralConfig,
@@ -19,8 +19,6 @@ use quick_runner::{
     pricing, scanner, secret, shell,
     stats_db::{CommandStats, StatsDb},
 };
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 
 #[derive(Parser)]
 #[command(name = "qr", version, about = "QuickRunner")]
@@ -143,6 +141,10 @@ fn run() -> Result<ExitCode> {
             commands::learn::print_summary(&result);
             Ok(ExitCode::SUCCESS)
         }
+        Commands::Init(args) => {
+            execute_init(args)?;
+            Ok(ExitCode::SUCCESS)
+        }
         command => run_with_config(command),
     }
 }
@@ -217,10 +219,8 @@ fn run_with_config(command: Commands) -> Result<ExitCode> {
             );
             Ok(ExitCode::SUCCESS)
         }
-        Commands::Init(args) => {
-            execute_init(&config, args)?;
-            stats.command_type = "__skip_stats__".into();
-            Ok(ExitCode::SUCCESS)
+        Commands::Init(_) => {
+            unreachable!("config-independent commands are dispatched before config load")
         }
         Commands::Cost { refresh } => {
             run_cost(&config, refresh)?;
@@ -277,11 +277,22 @@ fn record_stats(config: &AppConfig, stats: &CommandStats) -> Result<()> {
     db.record(stats)
 }
 
-fn execute_init(config: &AppConfig, args: InitArgs) -> Result<()> {
+fn execute_init(args: InitArgs) -> Result<()> {
     let config_path = config_file_path();
-    let is_new = !config_path.exists();
+    let existing = if config_path.exists() {
+        Some(AppConfig::load_from_env_with_path(config_path.clone()))
+    } else {
+        None
+    };
+    let needs_recreate = !config_path.exists() || existing.as_ref().is_some_and(Result::is_err);
 
-    if is_new {
+    let effective_config = if needs_recreate {
+        if let Some(Err(error)) = existing {
+            println!(
+                "config at {} is invalid; recreating it ({error:#})",
+                config_path.display()
+            );
+        }
         // Ask for project roots interactively
         println!("Welcome to QuickRunner! Let's set up your project roots.");
         println!("Enter directories to scan for projects (one per line, empty line to finish):");
@@ -328,21 +339,14 @@ fn execute_init(config: &AppConfig, args: InitArgs) -> Result<()> {
             },
         })?;
 
-        if let Some(parent) = config_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(&config_path, &config_content)?;
-        restrict_config_permissions(&config_path)?;
+        atomic::write_private(&config_path, config_content.as_bytes())?;
         println!("created {}", config_path.display());
+        AppConfig::load_from_env_with_path(config_path.clone())?
     } else {
         println!("config already present at {}", config_path.display());
-    }
-
-    // Reload config in case we just wrote a new one with custom roots
-    let effective_config = if is_new {
-        AppConfig::load()?
-    } else {
-        config.clone()
+        existing
+            .transpose()?
+            .expect("existing config must be loaded when no recreation is needed")
     };
 
     if !args.no_shell_wrapper {
@@ -449,6 +453,7 @@ fn maybe_store_key_in_keychain(
         "Store the API key in your OS keychain (recommended; keeps it out of config.toml)?",
         true,
     )? {
+        println!("API key will be stored in config.toml");
         return Ok(api_key);
     }
     let account = secret::account_for(api_key_env, protocol.default_api_key_env());
@@ -461,6 +466,7 @@ fn maybe_store_key_in_keychain(
             println!(
                 "⚠ could not use the keychain ({error}); storing the key in config.toml instead"
             );
+            println!("API key will be stored in config.toml");
             Ok(api_key)
         }
     }
@@ -468,6 +474,7 @@ fn maybe_store_key_in_keychain(
 
 fn prompt_fallback_ai_config() -> Result<FallbackAiConfig> {
     let (protocol, base_url, model, api_key, api_key_env) = prompt_provider_fields("fallback")?;
+    let api_key = maybe_store_key_in_keychain(protocol, &api_key_env, api_key)?;
     Ok(FallbackAiConfig {
         protocol,
         base_url,
@@ -551,16 +558,6 @@ fn prompt(label: &str) -> Result<Option<String>> {
         return Ok(None);
     }
     Ok(Some(line.trim().to_string()))
-}
-
-fn restrict_config_permissions(path: &std::path::Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        let permissions = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(path, permissions)?;
-    }
-
-    Ok(())
 }
 
 fn install_cron() -> Result<()> {
