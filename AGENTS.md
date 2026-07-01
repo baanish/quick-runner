@@ -33,9 +33,23 @@ Working notes for agents and contributors on QuickRunner (`qr`).
 - **Gotcha — `qr go` needs a TTY for ambiguous matches:** in a non-interactive shell, a query that
   matches multiple projects errors with `Multiple matches for '<q>'` instead of showing the picker.
   Use a unique substring (or `--print-path`) when scripting.
-- **AI features** (`qr do` / `qr learn`) need a real OpenAI/Anthropic-compatible key
-  (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` or the OS keychain); they are not required for build,
-  lint, tests, or the core scan/go/stats flow.
+- **AI (`qr do`)** is the only command that makes a live model call (`qr learn` is static
+  marker-based detection and needs no key). It resolves the API key from the protocol's
+  well-known env var (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY`), then `config.toml`, then the OS
+  keychain — so exporting `OPENAI_API_KEY` is enough to authenticate. Point it at a specific
+  model/endpoint with `QR_AI_MODEL` and `QR_AI_BASE_URL` (there is no `OPENAI_MODEL`/
+  `OPENAI_BASE_URL` mapping — map those yourself). `qr do` prints the AI-suggested command and
+  only runs it after you type `y` (default is No), so it is safe to pipe `n` for a
+  non-executing smoke test. None of this is required for build, lint, tests, or scan/go/stats.
+- **Gotcha — AI fallback provider:** the default config defines an `[ai.fallback]` pointing at
+  `https://api.openai.com/v1`. If you set `QR_AI_BASE_URL` to a proxy/gateway (whose key is not a
+  real OpenAI key) and the primary call has a transient failure/timeout, `qr` falls back to
+  api.openai.com and fails with a confusing `401 Incorrect API key`. When using a custom endpoint,
+  also set `QR_AI_FALLBACK_BASE_URL` (and `QR_AI_FALLBACK_MODEL`) to the same endpoint.
+- **Gotcha — secrets in the Desktop terminal:** injected secret env vars are present in the agent
+  shell but a freshly opened Desktop GUI terminal may not inherit them. To drive an AI demo from the
+  Desktop, write the needed vars to a temp file the agent shell can produce and `source` it in the
+  Desktop shell (then delete it) — do not print secret values or commit them.
 
 ## Deferred decisions — do not pre-emptively implement
 
