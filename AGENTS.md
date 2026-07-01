@@ -25,11 +25,12 @@ Working notes for agents and contributors on QuickRunner (`qr`).
   `QR_PROJECT_ROOTS` (colon-separated), `QR_SCAN_DEPTH`, `QR_STATS_ENABLED=true`,
   `QR_STATS_DB_PATH=/tmp/…`. A quick end-to-end smoke test:
   `qr scan` → `qr go --print-path <name>` → `qr stats`.
-- **Test fixtures:** `test-projects/` holds four dependency-free LeetCode-easy sample projects
-  (Rust / Node / Python / Go), one per language `qr learn` detects. Point QuickRunner at them with
-  `export QR_PROJECT_ROOTS="$PWD/test-projects"` (from the repo root) to exercise `scan`, `go`,
-  `run`, and `learn` against real projects. See `test-projects/README.md`. Running them creates
-  gitignored artifacts (`target/`, `.qr/`, etc.).
+- **Test fixtures (environment-provided, not in the repo):** four dependency-free LeetCode-easy
+  sample projects (Rust / Node / Python / Go), one per language `qr learn` detects, live at
+  `$HOME/qr-test-projects` on the VM. They are seeded by `$HOME/.local/bin/qr-seed-test-projects`
+  (idempotent), which the startup update script runs. Point QuickRunner at them with
+  `export QR_PROJECT_ROOTS="$HOME/qr-test-projects"` to exercise `scan`, `go`, `run`, and `learn`
+  against real projects. If they are ever missing, regenerate with `qr-seed-test-projects`.
 - **Gotcha — `qr go` needs a TTY for ambiguous matches:** in a non-interactive shell, a query that
   matches multiple projects errors with `Multiple matches for '<q>'` instead of showing the picker.
   Use a unique substring (or `--print-path`) when scripting.

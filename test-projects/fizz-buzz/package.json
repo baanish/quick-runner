@@ -1,9 +1,0 @@
-{
-  "name": "fizz-buzz",
-  "version": "1.0.0",
-  "description": "LeetCode 412. Fizz Buzz",
-  "scripts": {
-    "start": "node index.js",
-    "test": "node index.js"
-  }
-}

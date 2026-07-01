@@ -1,5 +1,0 @@
-[project]
-name = "palindrome-number"
-version = "0.1.0"
-description = "LeetCode 9. Palindrome Number"
-requires-python = ">=3.8"
