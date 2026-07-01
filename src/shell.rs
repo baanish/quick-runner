@@ -1,6 +1,7 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
+    process::Output,
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -165,6 +166,46 @@ pub fn cron_line(binary_path: &Path) -> String {
     )
 }
 
+pub fn merge_cron_entry(existing: &str, new_line: &str) -> Option<String> {
+    if existing.contains(new_line) {
+        return None;
+    }
+
+    let mut merged = existing.to_string();
+    if !merged.ends_with('\n') && !merged.is_empty() {
+        merged.push('\n');
+    }
+    merged.push_str(new_line);
+    merged.push('\n');
+    Some(merged)
+}
+
+pub fn crontab_contents_from_list_output(output: &Output) -> Result<String> {
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+    }
+
+    if is_known_no_crontab_message(&output.stdout) || is_known_no_crontab_message(&output.stderr) {
+        return Ok(String::new());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        format!("exit status {}", output.status)
+    };
+    Err(anyhow!("`crontab -l` failed: {detail}"))
+}
+
+fn is_known_no_crontab_message(stream: &[u8]) -> bool {
+    let message = String::from_utf8_lossy(stream);
+    message.to_ascii_lowercase().contains("no crontab for")
+}
+
 fn validate_alias_name(name: &str) -> Result<()> {
     let mut chars = name.chars();
     let valid = match chars.next() {
@@ -268,6 +309,17 @@ fn write_lines(path: &Path, lines: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::{os::unix::process::ExitStatusExt, process::Output};
+
+    #[cfg(unix)]
+    fn output(status: i32, stdout: &str, stderr: &str) -> Output {
+        Output {
+            status: std::process::ExitStatus::from_raw(status << 8),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
 
     #[test]
     fn alias_helpers_add_list_and_remove() {
@@ -404,5 +456,45 @@ mod tests {
         // name/value separator.
         let parsed = parse_alias_line("alias e 'echo a=b'").unwrap();
         assert_eq!(parsed, ("e".to_string(), "echo a=b".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_cron_entry_adds_new_line() {
+        let merged = merge_cron_entry("MAILTO=user@example.com\n", "0 * * * * '/tmp/qr' scan")
+            .expect("new cron entry should be appended");
+        assert_eq!(
+            merged,
+            "MAILTO=user@example.com\n0 * * * * '/tmp/qr' scan\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn crontab_list_output_treats_no_crontab_as_empty() {
+        for stderr in [
+            "no crontab for ubuntu\n",
+            "crontab: no crontab for ubuntu\n",
+        ] {
+            let existing = crontab_contents_from_list_output(&output(1, "", stderr))
+                .expect("known no-crontab message should map to an empty crontab");
+            assert!(existing.is_empty(), "expected empty crontab for {stderr:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn crontab_list_output_rejects_other_failures() {
+        let err = crontab_contents_from_list_output(&output(1, "", "permission denied\n"))
+            .expect_err("unexpected crontab -l failures must abort installation");
+        let message = err.to_string();
+        assert!(
+            message.contains("crontab -l"),
+            "missing command context: {message}"
+        );
+        assert!(
+            message.contains("permission denied"),
+            "missing stderr detail: {message}"
+        );
     }
 }
