@@ -591,7 +591,10 @@ db_path = "/tmp/file.db"
 
         let migrated = migrate_legacy_config(&new_dir, Some(&legacy)).unwrap();
         assert!(!migrated);
-        assert_eq!(fs::read_to_string(new_dir.join("config.toml")).unwrap(), "new");
+        assert_eq!(
+            fs::read_to_string(new_dir.join("config.toml")).unwrap(),
+            "new"
+        );
         assert!(legacy.join("config.toml").exists());
     }
 
