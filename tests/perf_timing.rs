@@ -35,7 +35,7 @@ fn scan_timing_flow_runs_against_library_api() {
     // Regression guard (test isolation): the cache must resolve inside the temp
     // config dir, never the developer's real one. QR_CONFIG_DIR is honored on every
     // OS; XDG_CONFIG_HOME is a no-op on macOS, which previously let `cargo test`
-    // overwrite the real ~/Library/Application Support/qr cache.
+    // overwrite the real ~/.qr cache.
     assert!(
         config.cache_path().starts_with(&cfg_dir),
         "cache path {:?} escaped the temp config dir {:?}",
