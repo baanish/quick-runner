@@ -8,6 +8,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 use crate::ai::providers::{AiProtocol, ProviderConfig};
+use crate::atomic;
 
 const DEFAULT_CONFIG: &str = include_str!("../config/default.toml");
 
@@ -267,7 +268,7 @@ fn rewrite_legacy_paths_in_config(
     };
 
     if let Some(updated) = rewrite_stats_db_path_in_toml(&raw, &new_value)? {
-        fs::write(config_path, updated)?;
+        atomic::write_private(config_path, updated.as_bytes())?;
     }
 
     Ok(())
@@ -369,7 +370,7 @@ pub fn write_default_config_if_missing(path: &Path) -> Result<bool> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(path, DEFAULT_CONFIG)?;
+    atomic::write_private(path, DEFAULT_CONFIG.as_bytes())?;
     Ok(true)
 }
 
