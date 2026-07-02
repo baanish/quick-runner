@@ -1,6 +1,6 @@
 use std::{
     env,
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     process::{Command, ExitCode},
     time::Instant,
 };
@@ -18,6 +18,7 @@ use quick_runner::{
     },
     pricing, scanner, secret, shell,
     stats_db::{CommandStats, StatsDb},
+    terminal,
 };
 
 #[derive(Parser)]
@@ -379,12 +380,33 @@ fn prompt_provider_fields(label: &str) -> Result<(AiProtocol, String, String, St
     let protocol = prompt_protocol(label)?;
     let base_url = prompt_with_default(&format!("{label} base URL"), protocol.default_base_url())?;
     let model = prompt_required(&format!("{label} model name"))?;
-    let api_key = prompt_required(&format!("{label} API key"))?;
+    let api_key = prompt_required_for_provider_field(&format!("{label} API key"))?;
     let api_key_env = prompt_with_default(
         &format!("{label} API key env var override"),
         protocol.default_api_key_env(),
     )?;
     Ok((protocol, base_url, model, api_key, api_key_env))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptSensitivity {
+    Plain,
+    Secret,
+}
+
+fn provider_field_prompt_sensitivity(label: &str) -> PromptSensitivity {
+    if label.trim_end().ends_with("API key") {
+        PromptSensitivity::Secret
+    } else {
+        PromptSensitivity::Plain
+    }
+}
+
+fn prompt_required_for_provider_field(label: &str) -> Result<String> {
+    match provider_field_prompt_sensitivity(label) {
+        PromptSensitivity::Plain => prompt_required(label),
+        PromptSensitivity::Secret => prompt_secret_required(label),
+    }
 }
 
 fn prompt_ai_config(label: &str) -> Result<AiConfig> {
@@ -520,6 +542,18 @@ fn prompt_required(label: &str) -> Result<String> {
     }
 }
 
+fn prompt_secret_required(label: &str) -> Result<String> {
+    loop {
+        match prompt_secret(label)? {
+            Some(value) if !value.trim().is_empty() => return Ok(value),
+            None => {
+                anyhow::bail!("Unexpected end of input while reading '{label}' (is stdin closed?)")
+            }
+            Some(_) => println!("{label} is required."),
+        }
+    }
+}
+
 fn prompt_with_default(label: &str, default: &str) -> Result<String> {
     // A blank line or EOF both fall back to the default.
     let value = prompt(&format!("{label} [{default}]"))?.unwrap_or_default();
@@ -557,6 +591,14 @@ fn prompt(label: &str) -> Result<Option<String>> {
         return Ok(None);
     }
     Ok(Some(line.trim().to_string()))
+}
+
+fn prompt_secret(label: &str) -> Result<Option<String>> {
+    if !io::stdin().is_terminal() {
+        return prompt(label);
+    }
+    let value = rpassword::prompt_password(format!("{label}: "))?;
+    Ok(Some(value.trim().to_string()))
 }
 
 fn install_cron() -> Result<()> {
@@ -603,7 +645,7 @@ fn print_go_result(result: &GoResult, print_path: bool) -> Result<()> {
     if print_path {
         println!("{}", result.path);
     } else {
-        println!("→ cd {}", result.path);
+        println!("→ cd {}", terminal::escape_untrusted(&result.path));
     }
     Ok(())
 }
@@ -649,5 +691,26 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Doctor => "doctor",
         Commands::Cost { .. } => "cost",
         Commands::Do { .. } => "do",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_key_provider_field_uses_secret_prompting() {
+        assert_eq!(
+            provider_field_prompt_sensitivity("primary API key"),
+            PromptSensitivity::Secret
+        );
+        assert_eq!(
+            provider_field_prompt_sensitivity("fallback API key"),
+            PromptSensitivity::Secret
+        );
+        assert_eq!(
+            provider_field_prompt_sensitivity("primary model name"),
+            PromptSensitivity::Plain
+        );
     }
 }

@@ -42,11 +42,10 @@ Working notes for agents and contributors on QuickRunner (`qr`).
   `OPENAI_BASE_URL` mapping — map those yourself). `qr do` prints the AI-suggested command and
   only runs it after you type `y` (default is No), so it is safe to pipe `n` for a
   non-executing smoke test. None of this is required for build, lint, tests, or scan/go/stats.
-- **Gotcha — AI fallback provider:** the default config defines an `[ai.fallback]` pointing at
-  `https://api.openai.com/v1`. If you set `QR_AI_BASE_URL` to a proxy/gateway (whose key is not a
-  real OpenAI key) and the primary call has a transient failure/timeout, `qr` falls back to
-  api.openai.com and fails with a confusing `401 Incorrect API key`. When using a custom endpoint,
-  also set `QR_AI_FALLBACK_BASE_URL` (and `QR_AI_FALLBACK_MODEL`) to the same endpoint.
+- **Gotcha — AI fallback provider:** the default config does not define an `[ai.fallback]`. If you
+  configure one manually, `qr` refuses to retry prompt context against a different protocol/base URL
+  unless `QR_AI_ALLOW_CROSS_ENDPOINT_FALLBACK=true` is set. When using a proxy/gateway and you want
+  automatic fallback, keep the fallback endpoint on the same base URL or opt in explicitly.
 - **Gotcha — secrets in the Desktop terminal:** injected secret env vars are present in the agent
   shell but a freshly opened Desktop GUI terminal may not inherit them. To drive an AI demo from the
   Desktop, write the needed vars to a temp file the agent shell can produce and `source` it in the

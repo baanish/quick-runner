@@ -13,13 +13,6 @@ model = ""
 api_key = ""
 api_key_env = "OPENAI_API_KEY"
 
-[ai.fallback]
-protocol = "openai"
-base_url = "https://api.openai.com/v1"
-model = ""
-api_key = ""
-api_key_env = "OPENAI_API_KEY"
-
 [stats]
 enabled = false
 db_path = "__default__"

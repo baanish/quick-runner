@@ -11,6 +11,7 @@ use crate::{
     ai::client::{AiClient, AiResponse},
     config::{AgentConfig, AppConfig},
     project_profile::{ProjectProfile, discover_project_root, load_profile_from},
+    terminal,
 };
 
 const CLASSIFICATION_PROMPT: &str = r#"You are QuickRunner's router.
@@ -114,11 +115,18 @@ fn load_current_profile() -> Result<ProjectProfile> {
 }
 
 fn print_inline_preview(command: &str, reason: Option<&str>) -> Result<()> {
-    println!("→ {command}");
-    if let Some(reason) = reason.filter(|value| !value.trim().is_empty()) {
-        println!("  {reason}");
+    for line in inline_preview_lines(command, reason) {
+        println!("{line}");
     }
     Ok(())
+}
+
+fn inline_preview_lines(command: &str, reason: Option<&str>) -> Vec<String> {
+    let mut lines = vec![format!("→ {}", terminal::escape_untrusted(command))];
+    if let Some(reason) = reason.filter(|value| !value.trim().is_empty()) {
+        lines.push(format!("  {}", terminal::escape_untrusted(reason)));
+    }
+    lines
 }
 
 /// Confirm and run an inline command. Every AI-generated command gets the same
@@ -177,14 +185,23 @@ fn build_delegate_suggestions(
 }
 
 fn print_delegate_suggestions(suggestions: &[String], reason: Option<&str>) -> Result<()> {
-    println!("🧠 This looks like a multi-step coding task.");
-    if let Some(reason) = reason.filter(|value| !value.trim().is_empty()) {
-        println!("  {reason}");
-    }
-    for suggestion in suggestions {
-        println!("→ Suggested: {suggestion}");
+    for line in delegate_suggestion_lines(suggestions, reason) {
+        println!("{line}");
     }
     Ok(())
+}
+
+fn delegate_suggestion_lines(suggestions: &[String], reason: Option<&str>) -> Vec<String> {
+    let mut lines = vec!["🧠 This looks like a multi-step coding task.".to_string()];
+    if let Some(reason) = reason.filter(|value| !value.trim().is_empty()) {
+        lines.push(format!("  {}", terminal::escape_untrusted(reason)));
+    }
+    lines.extend(
+        suggestions
+            .iter()
+            .map(|suggestion| format!("→ Suggested: {}", terminal::escape_untrusted(suggestion))),
+    );
+    lines
 }
 
 #[cfg(test)]
@@ -223,5 +240,20 @@ mod tests {
         let suggestions =
             build_delegate_suggestions(&AgentConfig::default(), "refactor auth", Some(&profile));
         assert!(suggestions[0].starts_with("codex "));
+    }
+
+    #[test]
+    fn inline_preview_lines_escape_terminal_controls() {
+        let lines = inline_preview_lines("cargo test\u{1b}[2J", Some("\u{1b}[31mred"));
+        assert_eq!(lines[0], "→ cargo test\\u{1b}[2J");
+        assert_eq!(lines[1], "  \\u{1b}[31mred");
+    }
+
+    #[test]
+    fn delegate_suggestion_lines_escape_terminal_controls() {
+        let suggestions = vec!["codex exec \u{1b}[2J".to_string()];
+        let lines = delegate_suggestion_lines(&suggestions, Some("\u{1b}[31magent"));
+        assert_eq!(lines[1], "  \\u{1b}[31magent");
+        assert_eq!(lines[2], "→ Suggested: codex exec \\u{1b}[2J");
     }
 }
