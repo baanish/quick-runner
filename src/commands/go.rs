@@ -3,7 +3,9 @@ use std::io::IsTerminal;
 use anyhow::{Result, anyhow};
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 
-use crate::{config::AppConfig, picker, scanner::ProjectEntry, scanner::load_or_scan_projects};
+use crate::{
+    config::AppConfig, picker, scanner::ProjectEntry, scanner::load_or_scan_projects, terminal,
+};
 
 pub struct GoResult {
     pub path: String,
@@ -25,10 +27,7 @@ pub fn execute(config: &AppConfig, query: &str) -> Result<GoResult> {
     let selected = if matches.len() == 1 {
         matches[0].clone()
     } else if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
-        let labels = matches
-            .iter()
-            .map(|entry| format!("{} ({})", entry.name, entry.path))
-            .collect::<Vec<_>>();
+        let labels = matches.iter().map(project_choice_label).collect::<Vec<_>>();
         let picker_start = std::time::Instant::now();
         let Some(index) = picker::pick_index(&labels)? else {
             return Err(anyhow!("Selection cancelled"));
@@ -38,11 +37,7 @@ pub fn execute(config: &AppConfig, query: &str) -> Result<GoResult> {
     } else {
         return Err(anyhow!(
             "Multiple matches for '{query}': {}",
-            matches
-                .iter()
-                .map(|entry| entry.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            multiple_match_names(&matches)
         ));
     };
 
@@ -50,6 +45,22 @@ pub fn execute(config: &AppConfig, query: &str) -> Result<GoResult> {
         path: selected.path,
         interactive_ms,
     })
+}
+
+fn project_choice_label(entry: &ProjectEntry) -> String {
+    format!(
+        "{} ({})",
+        terminal::escape_untrusted(&entry.name),
+        terminal::escape_untrusted(&entry.path)
+    )
+}
+
+fn multiple_match_names(entries: &[ProjectEntry]) -> String {
+    entries
+        .iter()
+        .map(|entry| terminal::escape_untrusted(&entry.name))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 pub fn rank_matches(entries: &[ProjectEntry], query: &str) -> Vec<ProjectEntry> {
@@ -186,5 +197,35 @@ mod tests {
         let matches = rank_matches(&sample_projects(), "OrionApp");
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].name, "orion-app");
+    }
+
+    #[test]
+    fn project_choice_label_escapes_terminal_controls() {
+        let entry = ProjectEntry {
+            name: "bad\u{1b}[2J".into(),
+            path: "/tmp/bad\u{7}".into(),
+            source: "git".into(),
+        };
+        assert_eq!(
+            project_choice_label(&entry),
+            "bad\\u{1b}[2J (/tmp/bad\\u{7})"
+        );
+    }
+
+    #[test]
+    fn multiple_match_names_escape_terminal_controls() {
+        let entries = vec![
+            ProjectEntry {
+                name: "one\u{1b}[2J".into(),
+                path: "/tmp/one".into(),
+                source: "git".into(),
+            },
+            ProjectEntry {
+                name: "two\u{7}".into(),
+                path: "/tmp/two".into(),
+                source: "git".into(),
+            },
+        ];
+        assert_eq!(multiple_match_names(&entries), "one\\u{1b}[2J, two\\u{7}");
     }
 }

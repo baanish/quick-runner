@@ -9,6 +9,7 @@ pub mod scanner;
 pub mod secret;
 pub mod shell;
 pub mod stats_db;
+pub mod terminal;
 
 /// A single process-wide lock for unit tests that mutate environment variables.
 /// One shared lock (rather than a per-module copy) is required because env vars

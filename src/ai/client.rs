@@ -10,6 +10,7 @@ use crate::ai::providers::{AiProtocol, ProviderConfig};
 /// (`max_tokens` is 1024), so 8 MiB is generous while still bounding memory
 /// against a malicious or buggy provider streaming an unbounded body.
 const MAX_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
+const ALLOW_CROSS_ENDPOINT_FALLBACK_ENV: &str = "QR_AI_ALLOW_CROSS_ENDPOINT_FALLBACK";
 
 #[derive(Debug, Clone)]
 pub struct AiClient {
@@ -61,6 +62,11 @@ impl AiClient {
             Ok(response) => Ok(response),
             Err(primary_error) => {
                 if let Some(fallback) = &self.fallback {
+                    if !fallback_can_receive_prompt(&self.primary, fallback) {
+                        return Err(anyhow!(
+                            "Primary provider failed: {primary_error}. Refusing to send prompt to fallback provider at a different endpoint; set {ALLOW_CROSS_ENDPOINT_FALLBACK_ENV}=true to allow cross-endpoint fallback."
+                        ));
+                    }
                     self.send_prompt(fallback, "fallback", system_prompt, user_message)
                         .map_err(|fallback_error| {
                             anyhow!(
@@ -125,6 +131,25 @@ impl AiClient {
         let json: Value = serde_json::from_str(&body).context("Failed to parse AI response")?;
         parse_response(provider, &json)
     }
+}
+
+fn fallback_can_receive_prompt(primary: &ProviderConfig, fallback: &ProviderConfig) -> bool {
+    same_ai_endpoint(primary, fallback) || env_flag_enabled(ALLOW_CROSS_ENDPOINT_FALLBACK_ENV)
+}
+
+fn same_ai_endpoint(primary: &ProviderConfig, fallback: &ProviderConfig) -> bool {
+    primary.protocol == fallback.protocol && endpoint_url(primary) == endpoint_url(fallback)
+}
+
+fn env_flag_enabled(key: &str) -> bool {
+    env::var(key)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn resolve_api_key(provider: &ProviderConfig, keychain_role: &str) -> Result<String> {
@@ -424,6 +449,51 @@ mod tests {
             .execute_prompt("You classify tasks", "run tests")
             .unwrap_err();
         assert!(error.to_string().contains("rate limited"));
+
+        unsafe {
+            std::env::remove_var("QR_TEST_AI_KEY");
+        }
+    }
+
+    #[test]
+    fn cross_endpoint_fallback_requires_explicit_opt_in() {
+        let _guard = test_env_lock().lock().unwrap();
+        clear_test_env();
+        let primary = spawn_server(500, r#"{"error":{"message":"primary down"}}"#);
+        let fallback = spawn_server(
+            200,
+            r#"{"choices":[{"message":{"content":"cargo test"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#,
+        );
+        unsafe {
+            std::env::set_var("QR_TEST_AI_KEY", "token");
+        }
+
+        let client = AiClient::new(
+            ProviderConfig {
+                protocol: AiProtocol::OpenAi,
+                base_url: primary,
+                model: "demo".into(),
+                api_key: String::new(),
+                api_key_env: "QR_TEST_AI_KEY".into(),
+            },
+            Some(ProviderConfig {
+                protocol: AiProtocol::OpenAi,
+                base_url: fallback,
+                model: "demo".into(),
+                api_key: String::new(),
+                api_key_env: "QR_TEST_AI_KEY".into(),
+            }),
+        );
+
+        let error = client
+            .execute_prompt("You classify tasks", "run tests")
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Refusing to send prompt to fallback provider at a different endpoint"),
+            "{error:#}"
+        );
 
         unsafe {
             std::env::remove_var("QR_TEST_AI_KEY");
