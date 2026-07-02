@@ -348,6 +348,7 @@ mod tests {
             "CUSTOM_QR_TEST_ANTHROPIC_KEY",
             "OPENAI_API_KEY",
             "ANTHROPIC_API_KEY",
+            ALLOW_CROSS_ENDPOINT_FALLBACK_ENV,
         ] {
             unsafe {
                 std::env::remove_var(key);
@@ -453,6 +454,17 @@ mod tests {
         unsafe {
             std::env::remove_var("QR_TEST_AI_KEY");
         }
+    }
+
+    #[test]
+    fn clear_test_env_removes_cross_endpoint_fallback_opt_in() {
+        unsafe {
+            std::env::set_var(ALLOW_CROSS_ENDPOINT_FALLBACK_ENV, "true");
+        }
+
+        clear_test_env();
+
+        assert!(std::env::var(ALLOW_CROSS_ENDPOINT_FALLBACK_ENV).is_err());
     }
 
     #[test]
