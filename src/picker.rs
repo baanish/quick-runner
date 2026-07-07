@@ -8,6 +8,11 @@ use crossterm::{
     terminal::{self, ClearType},
 };
 
+const ANSI_RESET: &str = "\x1b[0m";
+const ANSI_BOLD: &str = "\x1b[1m";
+const ANSI_DIM: &str = "\x1b[2m";
+const ANSI_CYAN: &str = "\x1b[36m";
+
 /// Restores the terminal (cursor + cooked mode) on every exit path — including
 /// early `?` errors and panics — so a crash mid-pick can never leave the user's
 /// shell in raw mode with a hidden cursor.
@@ -193,18 +198,26 @@ pub fn pick_live_index(options: &[String]) -> Result<Option<usize>> {
     // stay reserved for `--print-path` and the installed shell wrapper's `cd`.
     let _guard = RawModeGuard::enter()?;
     let mut state = LiveFilterState::new(options.to_vec());
-    let per_page = 9usize;
+    let per_page = 7usize;
+    let mut rendered_lines = 0usize;
 
     loop {
-        render_live_filter(&state, per_page)?;
+        rendered_lines = render_live_filter(&state, per_page, rendered_lines)?;
         if let Event::Key(key) = event::read()? {
             if !should_handle_key_event(key.kind) {
                 continue;
             }
             match key.code {
-                KeyCode::Enter => return Ok(state.selected_index()),
-                KeyCode::Esc => return Ok(None),
+                KeyCode::Enter => {
+                    clear_live_filter(rendered_lines)?;
+                    return Ok(state.selected_index());
+                }
+                KeyCode::Esc => {
+                    clear_live_filter(rendered_lines)?;
+                    return Ok(None);
+                }
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    clear_live_filter(rendered_lines)?;
                     return Ok(None);
                 }
                 KeyCode::Char(value) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -256,46 +269,159 @@ fn render_page(
     Ok(())
 }
 
-fn render_live_filter(state: &LiveFilterState, per_page: usize) -> Result<()> {
+fn render_live_filter(
+    state: &LiveFilterState,
+    per_page: usize,
+    previous_lines: usize,
+) -> Result<usize> {
     let mut stderr = io::stderr();
-    execute!(
-        stderr,
-        terminal::Clear(ClearType::All),
-        cursor::MoveTo(0, 0)
-    )?;
-
-    write!(stderr, "Find project: {}\r\n", state.query())?;
-    if state.matches().is_empty() {
-        write!(
+    if previous_lines > 0 {
+        execute!(
             stderr,
-            "No matches. Type to filter, Backspace to edit, Esc to cancel.\r\n"
+            cursor::MoveUp(previous_lines as u16),
+            terminal::Clear(ClearType::FromCursorDown)
         )?;
-        stderr.flush()?;
+    }
+
+    let lines = live_filter_lines(state, per_page, terminal_width());
+    for line in &lines {
+        write!(stderr, "{line}\r\n")?;
+    }
+    stderr.flush()?;
+    Ok(lines.len())
+}
+
+fn clear_live_filter(previous_lines: usize) -> Result<()> {
+    if previous_lines == 0 {
         return Ok(());
     }
 
-    for (offset, index) in state.visible_matches(per_page).iter().enumerate() {
-        let marker = if state.visible_selected_offset(per_page) == Some(offset) {
-            ">"
-        } else {
-            " "
-        };
-        write!(stderr, "{marker} {}\r\n", state.option(*index))?;
-    }
-
-    if state.matches().len() > per_page {
-        write!(
-            stderr,
-            "Showing {per_page}/{} matches. ",
-            state.matches().len()
-        )?;
-    }
-    write!(
+    let mut stderr = io::stderr();
+    execute!(
         stderr,
-        "Type to filter. ↑/↓ move. Enter selects. Esc cancels.\r\n"
+        cursor::MoveUp(previous_lines as u16),
+        terminal::Clear(ClearType::FromCursorDown)
     )?;
     stderr.flush()?;
     Ok(())
+}
+
+fn live_filter_lines(state: &LiveFilterState, per_page: usize, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let query = if state.query().is_empty() {
+        format!("{ANSI_DIM}type…{ANSI_RESET}")
+    } else {
+        format!("{ANSI_BOLD}{}{ANSI_RESET}", state.query())
+    };
+    lines.push(truncate_ansi(
+        &format!("{ANSI_CYAN}find{ANSI_RESET} project {query}"),
+        width,
+    ));
+
+    if state.matches().is_empty() {
+        lines.push(truncate_ansi(
+            &format!("  {ANSI_DIM}no matches · backspace to widen · esc cancels{ANSI_RESET}"),
+            width,
+        ));
+        return lines;
+    }
+
+    for (offset, index) in state.visible_matches(per_page).iter().enumerate() {
+        let selected = state.visible_selected_offset(per_page) == Some(offset);
+        let marker = if selected {
+            format!("{ANSI_CYAN}❯{ANSI_RESET}")
+        } else {
+            " ".to_string()
+        };
+        let (name, path) = split_live_label(state.option(*index));
+        lines.push(truncate_ansi(
+            &format!("{marker} {ANSI_BOLD}{name}{ANSI_RESET} {ANSI_DIM}{path}{ANSI_RESET}"),
+            width,
+        ));
+    }
+
+    let visible = state.visible_matches(per_page).len();
+    let total = state.matches().len();
+    let count = if total > visible {
+        format!("{visible}/{total} matches")
+    } else if total == 1 {
+        "1 match".to_string()
+    } else {
+        format!("{total} matches")
+    };
+    lines.push(truncate_ansi(
+        &format!("  {ANSI_DIM}{count} · type to filter · ↑/↓ move · enter selects · esc cancels{ANSI_RESET}"),
+        width,
+    ));
+    lines
+}
+
+fn split_live_label(label: &str) -> (&str, &str) {
+    if let Some((name, path)) = label.split_once('\t') {
+        return (name, path);
+    }
+    if let Some((name, path)) = label.rsplit_once(" (") {
+        if let Some(path) = path.strip_suffix(')') {
+            return (name, path);
+        }
+    }
+    (label, "")
+}
+
+fn terminal_width() -> usize {
+    terminal::size()
+        .map(|(width, _)| usize::from(width).max(40))
+        .unwrap_or(100)
+}
+
+fn truncate_ansi(input: &str, max_width: usize) -> String {
+    if max_width == 0 || visible_width(input) <= max_width {
+        return input.to_string();
+    }
+
+    let target = max_width.saturating_sub(1);
+    let mut output = String::new();
+    let mut visible = 0usize;
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            output.push(ch);
+            for next in chars.by_ref() {
+                output.push(next);
+                if next == 'm' {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        if visible >= target {
+            break;
+        }
+        output.push(ch);
+        visible += 1;
+    }
+
+    output.push('…');
+    output.push_str(ANSI_RESET);
+    output
+}
+
+fn visible_width(input: &str) -> usize {
+    let mut width = 0usize;
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            for next in chars.by_ref() {
+                if next == 'm' {
+                    break;
+                }
+            }
+        } else {
+            width += 1;
+        }
+    }
+    width
 }
 
 #[cfg(test)]
@@ -381,5 +507,36 @@ mod tests {
         assert!(should_handle_key_event(KeyEventKind::Press));
         assert!(should_handle_key_event(KeyEventKind::Repeat));
         assert!(!should_handle_key_event(KeyEventKind::Release));
+    }
+
+    #[test]
+    fn live_filter_render_is_compact_and_styled() {
+        let state = LiveFilterState::new(labels(&[
+            "quick-runner\t/Users/aanishbhirud/Development/quick-runner",
+            "orion-api\t/Users/aanishbhirud/Development/orion-api",
+        ]));
+
+        let lines = live_filter_lines(&state, 7, 72);
+
+        assert_eq!(lines.len(), 4);
+        assert!(lines[0].contains("\u{1b}[36mfind\u{1b}[0m"));
+        assert!(lines[1].contains("❯"));
+        assert!(lines[1].contains("\u{1b}[1mquick-runner\u{1b}[0m"));
+        assert!(
+            lines[1].contains("\u{1b}[2m/Users/aanishbhirud/Development/quick-runner\u{1b}[0m")
+        );
+        assert!(lines[3].contains("type to filter"));
+    }
+
+    #[test]
+    fn live_filter_render_truncates_long_rows_to_terminal_width() {
+        let state = LiveFilterState::new(labels(&[
+            "very-long-project-name\t/Users/aanishbhirud/Development/some/deep/path/that/would/wrap",
+        ]));
+
+        let lines = live_filter_lines(&state, 7, 48);
+
+        assert!(visible_width(&lines[1]) <= 48);
+        assert!(lines[1].contains('…'));
     }
 }
