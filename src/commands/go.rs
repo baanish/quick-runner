@@ -37,6 +37,9 @@ fn project_at_picker_index(
     projects: &[ProjectEntry],
     index: Option<usize>,
 ) -> Result<ProjectEntry> {
+    if projects.is_empty() {
+        return Err(anyhow!("No projects found. Run `qr scan` to refresh."));
+    }
     let Some(index) = index else {
         return Err(anyhow!("Selection cancelled"));
     };
@@ -269,5 +272,15 @@ mod tests {
         let selected = project_at_picker_index(&projects, Some(1)).unwrap();
 
         assert_eq!(selected.name, "orion-api");
+    }
+
+    #[test]
+    fn project_at_selected_live_index_reports_empty_project_cache() {
+        let error = project_at_picker_index(&[], None).unwrap_err();
+
+        assert!(
+            error.to_string().contains("No projects found"),
+            "unexpected error: {error:#}"
+        );
     }
 }

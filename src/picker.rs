@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use anyhow::Result;
 use crossterm::{
     cursor,
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{self, ClearType},
 };
@@ -180,6 +180,10 @@ pub fn pick_index(options: &[String]) -> Result<Option<usize>> {
     }
 }
 
+fn should_handle_key_event(kind: KeyEventKind) -> bool {
+    kind != KeyEventKind::Release
+}
+
 pub fn pick_live_index(options: &[String]) -> Result<Option<usize>> {
     if options.is_empty() {
         return Ok(None);
@@ -194,6 +198,9 @@ pub fn pick_live_index(options: &[String]) -> Result<Option<usize>> {
     loop {
         render_live_filter(&state, per_page)?;
         if let Event::Key(key) = event::read()? {
+            if !should_handle_key_event(key.kind) {
+                continue;
+            }
             match key.code {
                 KeyCode::Enter => return Ok(state.selected_index()),
                 KeyCode::Esc => return Ok(None),
@@ -367,5 +374,12 @@ mod tests {
 
         assert_eq!(state.selected_index(), Some(10));
         assert_eq!(state.visible_matches(9), &[2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    }
+
+    #[test]
+    fn live_picker_ignores_key_release_events() {
+        assert!(should_handle_key_event(KeyEventKind::Press));
+        assert!(should_handle_key_event(KeyEventKind::Repeat));
+        assert!(!should_handle_key_event(KeyEventKind::Release));
     }
 }
