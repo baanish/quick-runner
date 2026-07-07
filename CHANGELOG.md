@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- Bare `qr go` / `qr g` now opens a lightweight live-filter picker for cached projects while `qr go <project>` keeps the existing direct lookup behavior.
+
 ## [0.1.0] - 2026-07-02
 
 ### Added

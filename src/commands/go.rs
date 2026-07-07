@@ -13,6 +13,39 @@ pub struct GoResult {
     pub interactive_ms: u128,
 }
 
+pub fn execute_live(config: &AppConfig) -> Result<GoResult> {
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return Err(anyhow!("project name required"));
+    }
+
+    let cache = load_or_scan_projects(config)?;
+    let labels = cache
+        .projects
+        .iter()
+        .map(project_choice_label)
+        .collect::<Vec<_>>();
+    let picker_start = std::time::Instant::now();
+    let selected = project_at_picker_index(&cache.projects, picker::pick_live_index(&labels)?)?;
+
+    Ok(GoResult {
+        path: selected.path,
+        interactive_ms: picker_start.elapsed().as_millis(),
+    })
+}
+
+fn project_at_picker_index(
+    projects: &[ProjectEntry],
+    index: Option<usize>,
+) -> Result<ProjectEntry> {
+    let Some(index) = index else {
+        return Err(anyhow!("Selection cancelled"));
+    };
+    projects
+        .get(index)
+        .cloned()
+        .ok_or_else(|| anyhow!("Selection cancelled"))
+}
+
 pub fn execute(config: &AppConfig, query: &str) -> Result<GoResult> {
     let cache = load_or_scan_projects(config)?;
     let matches = rank_matches(&cache.projects, query);
@@ -227,5 +260,14 @@ mod tests {
             },
         ];
         assert_eq!(multiple_match_names(&entries), "one\\u{1b}[2J, two\\u{7}");
+    }
+
+    #[test]
+    fn project_at_selected_live_index_returns_matching_project() {
+        let projects = sample_projects();
+
+        let selected = project_at_picker_index(&projects, Some(1)).unwrap();
+
+        assert_eq!(selected.name, "orion-api");
     }
 }
