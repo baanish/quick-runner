@@ -644,6 +644,9 @@ fn detect_go_profile(root: &Path) -> Result<ProjectProfile> {
     // run/dev/debug unset (Makefile/Justfile/`.qr.toml` can still fill them).
     let build_context = GoBuildContext::from_go_mod(&raw);
     let root_is_main = go_root_is_main_package(root, &build_context);
+    let debug_command: Option<String> = (root_is_main
+        && go_race_detector_supported(&build_context))
+    .then(|| "go run -race .".into());
 
     let mut scripts = BTreeMap::new();
     scripts.insert("build".into(), "go build ./...".into());
@@ -653,7 +656,9 @@ fn detect_go_profile(root: &Path) -> Result<ProjectProfile> {
     if root_is_main {
         scripts.insert("run".into(), "go run .".into());
         scripts.insert("dev".into(), "go run .".into());
-        scripts.insert("debug".into(), "go run -race .".into());
+        if let Some(command) = &debug_command {
+            scripts.insert("debug".into(), command.clone());
+        }
     }
     scripts.insert("clean".into(), "go clean".into());
     scripts.insert("tidy".into(), "go mod tidy".into());
@@ -668,7 +673,7 @@ fn detect_go_profile(root: &Path) -> Result<ProjectProfile> {
         lint_command: Some("go vet ./...".into()),
         dev_command: root_is_main.then(|| "go run .".into()),
         run_command: root_is_main.then(|| "go run .".into()),
-        debug_command: root_is_main.then(|| "go run -race .".into()),
+        debug_command,
         scripts,
         prefer_agent: None,
         entry_points: detect_entry_points(root, &["main.go", "cmd/", "internal/"]),
@@ -891,6 +896,23 @@ fn current_goarch() -> &'static str {
         "wasm32" => "wasm",
         other => other,
     }
+}
+
+/// Go's race detector is only available on a documented set of GOOS/GOARCH
+/// pairs. Non-Darwin targets also require cgo; treat an unset CGO_ENABLED as
+/// unknown rather than suggesting a debug command that may fail immediately.
+fn go_race_detector_supported(build_context: &GoBuildContext) -> bool {
+    let target_supported = match build_context.goos.as_str() {
+        "linux" => matches!(
+            build_context.goarch.as_str(),
+            "amd64" | "arm64" | "loong64" | "ppc64le" | "riscv64" | "s390x"
+        ),
+        "darwin" => matches!(build_context.goarch.as_str(), "amd64" | "arm64"),
+        "freebsd" | "netbsd" | "windows" => build_context.goarch == "amd64",
+        _ => false,
+    };
+
+    target_supported && (build_context.goos == "darwin" || build_context.cgo_enabled == Some(true))
 }
 
 struct GoBuildContext {
@@ -1705,8 +1727,11 @@ fn merge_justfile_recipes(root: &Path, scripts: &mut BTreeMap<String, String>) {
             if matches!(first, "alias" | "set" | "export" | "import" | "mod") {
                 continue;
             }
-            let name = first.trim_end_matches(':');
-            if name == first {
+            // A leading `@` makes a Just recipe quiet; it is not part of the
+            // callable recipe name (`@test:` is invoked as `just test`).
+            let callable = first.strip_prefix('@').unwrap_or(first);
+            let name = callable.trim_end_matches(':');
+            if name == callable {
                 // No trailing colon on the first token — only a recipe if the
                 // line still has a `name args:` form (colon later on the line).
                 if !line.contains(':') {
@@ -1714,7 +1739,6 @@ fn merge_justfile_recipes(root: &Path, scripts: &mut BTreeMap<String, String>) {
                 }
             }
             if name.is_empty()
-                || name.starts_with('@')
                 || !name
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
@@ -1743,6 +1767,17 @@ fn detect_entry_points(root: &Path, candidates: &[&str]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn go_build_context(goos: &str, goarch: &str, cgo_enabled: Option<bool>) -> GoBuildContext {
+        GoBuildContext {
+            goos: goos.into(),
+            goarch: goarch.into(),
+            cgo_enabled,
+            minimum_release_minor: None,
+            arch_tuning: None,
+            user_tags: None,
+        }
+    }
 
     #[test]
     fn detects_node_profile_from_package_json() {
@@ -2337,7 +2372,45 @@ required-features = ["cli"]
         assert_eq!(profile.lint_command.as_deref(), Some("go vet ./..."));
         assert_eq!(profile.dev_command.as_deref(), Some("go run ."));
         assert_eq!(profile.run_command.as_deref(), Some("go run ."));
-        assert_eq!(profile.debug_command.as_deref(), Some("go run -race ."));
+        assert_eq!(
+            profile.debug_command.as_deref(),
+            profile.scripts.get("debug").map(String::as_str)
+        );
+    }
+
+    #[test]
+    fn go_debug_command_requires_cgo() {
+        assert!(!go_race_detector_supported(&go_build_context(
+            "linux",
+            "amd64",
+            Some(false)
+        )));
+        assert!(!go_race_detector_supported(&go_build_context(
+            "linux", "amd64", None
+        )));
+    }
+
+    #[test]
+    fn go_debug_command_requires_a_race_supported_target() {
+        assert!(!go_race_detector_supported(&go_build_context(
+            "plan9",
+            "amd64",
+            Some(true)
+        )));
+    }
+
+    #[test]
+    fn go_race_detector_support_matches_current_go_exceptions() {
+        assert!(go_race_detector_supported(&go_build_context(
+            "darwin",
+            "arm64",
+            Some(false)
+        )));
+        assert!(go_race_detector_supported(&go_build_context(
+            "linux",
+            "riscv64",
+            Some(true)
+        )));
     }
 
     #[test]
@@ -2988,6 +3061,25 @@ test:
         );
         assert!(!profile.scripts.contains_key("echo"));
         assert!(!profile.scripts.contains_key("printf"));
+    }
+
+    #[test]
+    fn justfile_quiet_recipe_is_merged_under_its_callable_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("package.json"),
+            r#"{ "name": "quiet-just-recipe" }"#,
+        )
+        .unwrap();
+        fs::write(tmp.path().join("justfile"), "@test:\n    cargo test\n").unwrap();
+
+        let profile = detect_profile(tmp.path()).unwrap();
+
+        assert_eq!(
+            profile.scripts.get("test").map(String::as_str),
+            Some("just test")
+        );
+        assert_eq!(profile.test_command.as_deref(), Some("just test"));
     }
 
     #[test]
