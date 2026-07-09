@@ -12,8 +12,11 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    env, fs,
-    path::{Path, PathBuf},
+    env,
+    ffi::OsStr,
+    fs,
+    io::{BufRead, BufReader},
+    path::{Component, Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
@@ -33,6 +36,12 @@ pub struct MinedCommand {
     pub count: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<String>,
+}
+
+#[derive(Debug)]
+struct ShellInvocation {
+    command: String,
+    workdir: Option<PathBuf>,
 }
 
 /// Overrideable roots for agent session stores (tests inject fixtures here).
@@ -139,13 +148,14 @@ pub fn mine_for_project_with_roots(
 }
 
 fn path_variants(project_root: &Path) -> Vec<PathBuf> {
-    let mut out = vec![project_root.to_path_buf()];
+    let normalized_root = lexically_normalize(project_root);
+    let mut out = vec![normalized_root.clone()];
     let push_unique = |out: &mut Vec<PathBuf>, p: PathBuf| {
         if !out.iter().any(|existing| existing == &p) {
             out.push(p);
         }
     };
-    if let Ok(canon) = project_root.canonicalize() {
+    if let Ok(canon) = normalized_root.canonicalize() {
         push_unique(&mut out, canon);
     }
     // macOS: `/var` is a symlink to `/private/var`. `current_dir()` often returns
@@ -165,6 +175,29 @@ fn path_variants(project_root: &Path) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+fn lexically_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let can_pop = normalized
+                    .file_name()
+                    .is_some_and(|name| name != OsStr::new(".."));
+                if can_pop {
+                    normalized.pop();
+                } else if !normalized.has_root() {
+                    normalized.push("..");
+                }
+            }
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
 }
 
 fn collect_from_dir_encoded(
@@ -201,15 +234,64 @@ fn collect_from_dir_encoded(
         }
     }
 
-    let mut files: Vec<PathBuf> = Vec::new();
+    let project_variants = path_variants(project);
+    let mut matched = 0usize;
     for dir in session_dirs {
-        collect_jsonl_files(&dir, &mut files);
+        visit_jsonl_files(&dir, &mut |file| {
+            if matched >= MAX_SESSION_FILES_PER_AGENT {
+                return false;
+            }
+            let session_cwd = session_declared_cwd(file);
+            let belongs = session_cwd
+                .as_ref()
+                .is_some_and(|cwd| workdir_belongs_to_project(cwd, &project_variants));
+            if let Some(session_cwd) = session_cwd.filter(|_| belongs) {
+                scan_jsonl_file(
+                    file,
+                    source,
+                    extract,
+                    &session_cwd,
+                    &project_variants,
+                    counts,
+                );
+                matched = matched.saturating_add(1);
+            }
+            matched < MAX_SESSION_FILES_PER_AGENT
+        });
+        if matched >= MAX_SESSION_FILES_PER_AGENT {
+            break;
+        }
     }
+}
 
-    files.truncate(MAX_SESSION_FILES_PER_AGENT);
-    for file in files {
-        scan_jsonl_file(&file, source, extract, counts);
+fn session_declared_cwd(path: &Path) -> Option<PathBuf> {
+    let file = fs::File::open(path).ok()?;
+    const POINTERS: &[&str] = &[
+        "/cwd",
+        "/payload/cwd",
+        "/session/cwd",
+        "/metadata/cwd",
+        "/data/cwd",
+        "/header/cwd",
+        "/worktree",
+        "/projectPath",
+        "/project_path",
+    ];
+    for line in BufReader::new(file).lines().take(50) {
+        let Ok(line) = line else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<JsonValue>(&line) else {
+            continue;
+        };
+        if let Some(cwd) = POINTERS
+            .iter()
+            .find_map(|pointer| value.pointer(pointer).and_then(JsonValue::as_str))
+        {
+            return Some(PathBuf::from(cwd));
+        }
     }
+    None
 }
 
 fn collect_codex(
@@ -220,51 +302,88 @@ fn collect_codex(
     if !sessions_root.is_dir() {
         return;
     }
-    // Collect broadly first, then keep only sessions whose cwd matches this
-    // project (or a subdir). Cap *after* filtering so busy multi-project
-    // machines still mine older-but-relevant sessions for the current project.
-    let mut candidates = Vec::new();
-    collect_jsonl_files_uncapped(sessions_root, &mut candidates);
-
-    let mut matched = 0usize;
-    for file in candidates {
-        if matched >= MAX_SESSION_FILES_PER_AGENT {
-            break;
+    let mut scanned = 0usize;
+    // Visit paths lazily so years of unrelated history do not accumulate in
+    // memory. Read only the small metadata prefix for unrelated sessions; scan
+    // the full file only when the session cwd overlaps this project.
+    visit_jsonl_files(sessions_root, &mut |file| {
+        if scanned >= MAX_SESSION_FILES_PER_AGENT {
+            return false;
         }
-        let Ok(raw) = fs::read_to_string(&file) else {
+        let Some(session_cwd) = codex_session_cwd(file) else {
+            return true;
+        };
+        let cwd_variants = path_variants(&session_cwd);
+        let overlaps = project_variants
+            .iter()
+            .any(|project| cwd_variants.iter().any(|cwd| paths_overlap(cwd, project)));
+        if reserve_codex_session_scan(&mut scanned, overlaps) {
+            scan_codex_session(file, &session_cwd, project_variants, counts);
+        }
+        scanned < MAX_SESSION_FILES_PER_AGENT
+    });
+}
+
+fn reserve_codex_session_scan(scanned: &mut usize, overlaps: bool) -> bool {
+    if !overlaps || *scanned >= MAX_SESSION_FILES_PER_AGENT {
+        return false;
+    }
+    *scanned = scanned.saturating_add(1);
+    true
+}
+
+fn codex_session_cwd(path: &Path) -> Option<PathBuf> {
+    let file = fs::File::open(path).ok()?;
+    for line in BufReader::new(file).lines().take(20) {
+        let Ok(line) = line else {
             continue;
         };
-        // Only mine sessions whose meta cwd is this project (or a subdir).
-        let mut belongs = false;
-        for line in raw.lines().take(20) {
-            if let Ok(v) = serde_json::from_str::<JsonValue>(line) {
-                if v.get("type").and_then(JsonValue::as_str) == Some("session_meta") {
-                    if let Some(cwd) = v
-                        .pointer("/payload/cwd")
-                        .and_then(JsonValue::as_str)
-                        .map(PathBuf::from)
-                    {
-                        let cwd_variants = path_variants(&cwd);
-                        if project_variants.iter().any(|project| {
-                            cwd_variants.iter().any(|cwd| paths_related(cwd, project))
-                        }) {
-                            belongs = true;
-                        }
-                    }
-                    break;
-                }
-            }
-        }
-        if !belongs {
+        let Ok(value) = serde_json::from_str::<JsonValue>(&line) else {
             continue;
-        }
-        matched = matched.saturating_add(1);
-        for line in raw.lines() {
-            for cmd in extract_codex_commands(line) {
-                record_command(counts, &cmd, "codex");
-            }
+        };
+        if value.get("type").and_then(JsonValue::as_str) == Some("session_meta") {
+            return value
+                .pointer("/payload/cwd")
+                .and_then(JsonValue::as_str)
+                .map(PathBuf::from);
         }
     }
+    None
+}
+
+fn scan_codex_session(
+    path: &Path,
+    session_cwd: &Path,
+    project_variants: &[PathBuf],
+    counts: &mut BTreeMap<String, (u32, BTreeSet<String>)>,
+) -> bool {
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut matched = false;
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
+        for invocation in extract_codex_invocations(&line) {
+            let declared_workdir = invocation
+                .workdir
+                .as_deref()
+                .map(|workdir| {
+                    if workdir.is_absolute() {
+                        workdir.to_path_buf()
+                    } else {
+                        session_cwd.join(workdir)
+                    }
+                })
+                .unwrap_or_else(|| session_cwd.to_path_buf());
+            matched |= record_command_scoped(
+                counts,
+                &invocation.command,
+                "codex",
+                &declared_workdir,
+                project_variants,
+            );
+        }
+    }
+    matched
 }
 
 fn collect_opencode(
@@ -284,114 +403,92 @@ fn collect_opencode(
 
     // Session directory or project worktree must match this project.
     // Query each path variant (canonical + as-given) because agents store either.
-    // Escape LIKE wildcards in the project path so `_` / `%` in directory names
-    // cannot match unrelated siblings.
+    // Use binary equality/prefix comparisons rather than LIKE: LIKE folds ASCII
+    // case by default and treats `%` / `_` in real paths as wildcards.
     let Ok(mut stmt) = conn.prepare(
-        "SELECT p.data
+        "SELECT p.data,
+                CASE WHEN s.directory IS NOT NULL AND s.directory != ''
+                     THEN s.directory ELSE proj.worktree END
          FROM part p
          JOIN session s ON s.id = p.session_id
          LEFT JOIN project proj ON proj.id = s.project_id
-         WHERE s.directory = ?1
-            OR s.directory LIKE ?2 ESCAPE '\\'
-            OR proj.worktree = ?1
-            OR proj.worktree LIKE ?2 ESCAPE '\\'",
+         WHERE s.directory COLLATE BINARY = ?1
+            OR substr(s.directory, 1, length(?1) + 1) COLLATE BINARY = ?1 || '/'
+            OR proj.worktree COLLATE BINARY = ?1
+            OR substr(proj.worktree, 1, length(?1) + 1) COLLATE BINARY = ?1 || '/'",
     ) else {
         return;
     };
 
     for project in project_variants {
         let project_str = project.to_string_lossy().to_string();
-        let like = format!("{}/%", escape_like_literal(&project_str));
-        let Ok(rows) = stmt.query_map(rusqlite::params![project_str, like], |row| {
-            row.get::<_, String>(0)
+        let Ok(rows) = stmt.query_map(rusqlite::params![project_str], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                PathBuf::from(row.get::<_, String>(1)?),
+            ))
         }) else {
             continue;
         };
 
-        for row in rows.flatten() {
-            for cmd in extract_opencode_part_commands(&row) {
-                record_command(counts, &cmd, "opencode");
+        for (data, session_cwd) in rows.flatten() {
+            for cmd in extract_opencode_part_commands(&data) {
+                record_command_scoped(counts, &cmd, "opencode", &session_cwd, project_variants);
             }
         }
     }
-}
-
-/// Escape `\`, `%`, and `_` for use in a SQL LIKE pattern with `ESCAPE '\'`.
-fn escape_like_literal(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
-            '\\' | '%' | '_' => {
-                out.push('\\');
-                out.push(ch);
-            }
-            _ => out.push(ch),
-        }
-    }
-    out
 }
 
 fn scan_jsonl_file(
     path: &Path,
     source: &str,
     extract: fn(&str) -> Vec<String>,
+    session_cwd: &Path,
+    project_variants: &[PathBuf],
     counts: &mut BTreeMap<String, (u32, BTreeSet<String>)>,
 ) {
-    let Ok(raw) = fs::read_to_string(path) else {
+    let Ok(file) = fs::File::open(path) else {
         return;
     };
-    for line in raw.lines() {
-        for cmd in extract(line) {
-            record_command(counts, &cmd, source);
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
+        for cmd in extract(&line) {
+            record_command_scoped(counts, &cmd, source, session_cwd, project_variants);
         }
     }
 }
 
-fn collect_jsonl_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    if out.len() >= MAX_SESSION_FILES_PER_AGENT {
-        return;
-    }
+fn visit_jsonl_files(dir: &Path, visitor: &mut impl FnMut(&Path) -> bool) -> bool {
     let Ok(entries) = fs::read_dir(dir) else {
-        return;
+        return true;
     };
-    let mut entries: Vec<_> = entries.flatten().collect();
-    // Prefer newer session files when we hit the cap.
-    entries.sort_by_key(|e| std::cmp::Reverse(e.metadata().ok().and_then(|m| m.modified().ok())));
-    for entry in entries {
-        if out.len() >= MAX_SESSION_FILES_PER_AGENT {
-            break;
-        }
-        let path = entry.path();
-        if path.is_dir() {
-            collect_jsonl_files(&path, out);
-        } else if path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
-        {
-            out.push(path);
-        }
-    }
-}
-
-/// Like [`collect_jsonl_files`], but without an early cap — used when a later
-/// filter (e.g. Codex cwd match) decides which files count toward the budget.
-fn collect_jsonl_files_uncapped(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    let mut entries: Vec<_> = entries.flatten().collect();
-    entries.sort_by_key(|e| std::cmp::Reverse(e.metadata().ok().and_then(|m| m.modified().ok())));
+    let mut entries = entries.flatten().collect::<Vec<_>>();
+    entries.sort_by_key(|entry| {
+        std::cmp::Reverse(
+            entry
+                .metadata()
+                .ok()
+                .and_then(|metadata| metadata.modified().ok()),
+        )
+    });
     for entry in entries {
         let path = entry.path();
-        if path.is_dir() {
-            collect_jsonl_files_uncapped(&path, out);
-        } else if path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            if !visit_jsonl_files(&path, visitor) {
+                return false;
+            }
+        } else if file_type.is_file()
+            && path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
+            && !visitor(&path)
         {
-            out.push(path);
+            return false;
         }
     }
+    true
 }
 
 fn extract_claude_commands(line: &str) -> Vec<String> {
@@ -418,7 +515,7 @@ fn extract_claude_commands(line: &str) -> Vec<String> {
     out
 }
 
-fn extract_codex_commands(line: &str) -> Vec<String> {
+fn extract_codex_invocations(line: &str) -> Vec<ShellInvocation> {
     let Ok(v) = serde_json::from_str::<JsonValue>(line) else {
         return Vec::new();
     };
@@ -437,16 +534,33 @@ fn extract_codex_commands(line: &str) -> Vec<String> {
     if matches!(ty, "function_call" | "custom_tool_call") && is_shell_tool_name(name) {
         // arguments is often a JSON string: {"cmd":"..."} or {"command":"..."}
         if let Some(args) = payload.get("arguments") {
-            if let Some(s) = args.as_str() {
-                if let Ok(parsed) = serde_json::from_str::<JsonValue>(s) {
-                    push_cmd_fields(&parsed, &mut out);
-                }
+            let parsed = if let Some(serialized) = args.as_str() {
+                serde_json::from_str::<JsonValue>(serialized).ok()
             } else if args.is_object() {
-                push_cmd_fields(args, &mut out);
+                Some(args.clone())
+            } else {
+                None
+            };
+            if let Some(parsed) = parsed {
+                let workdir = parsed
+                    .get("workdir")
+                    .or_else(|| parsed.get("cwd"))
+                    .or_else(|| parsed.get("dir"))
+                    .and_then(JsonValue::as_str)
+                    .map(PathBuf::from);
+                let mut commands = Vec::new();
+                push_cmd_fields(&parsed, &mut commands);
+                out.extend(commands.into_iter().map(|command| ShellInvocation {
+                    command,
+                    workdir: workdir.clone(),
+                }));
             }
         }
         if let Some(s) = payload.get("input").and_then(JsonValue::as_str) {
-            out.push(s.to_string());
+            out.push(ShellInvocation {
+                command: s.to_string(),
+                workdir: None,
+            });
         }
     }
     out
@@ -543,37 +657,121 @@ fn is_shell_tool_name(name: &str) -> bool {
     }
 }
 
-fn record_command(counts: &mut BTreeMap<String, (u32, BTreeSet<String>)>, raw: &str, source: &str) {
-    for cmd in normalize_and_split(raw) {
-        let cmd = redact_secrets(&cmd);
-        if !feels_commandlike(&cmd) {
+fn record_command_scoped(
+    counts: &mut BTreeMap<String, (u32, BTreeSet<String>)>,
+    raw: &str,
+    source: &str,
+    initial_workdir: &Path,
+    project_variants: &[PathBuf],
+) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.contains('\n') {
+        return false;
+    }
+    let mut workdir = lexically_normalize(initial_workdir);
+    let mut recorded = false;
+    for piece in split_shell_chains(trimmed) {
+        let piece = collapse_unquoted_ws(piece.trim().trim_start_matches("then ").trim());
+        if piece.is_empty() {
             continue;
         }
-        let entry = counts.entry(cmd).or_insert_with(|| (0, BTreeSet::new()));
-        entry.0 = entry.0.saturating_add(1);
-        entry.1.insert(source.to_string());
+        match parse_cd_navigation(&piece) {
+            CdNavigation::NotCd => {
+                if workdir_belongs_to_project(&workdir, project_variants) {
+                    recorded |= record_normalized_command(counts, &piece, source);
+                }
+            }
+            CdNavigation::Target(target) => {
+                if target == Path::new("-")
+                    || target.starts_with("~")
+                    || target.to_string_lossy().contains('$')
+                {
+                    break;
+                }
+                workdir = if target.is_absolute() {
+                    lexically_normalize(&target)
+                } else {
+                    lexically_normalize(&workdir.join(target))
+                };
+            }
+            CdNavigation::Invalid => break,
+        }
+    }
+    recorded
+}
+
+fn record_normalized_command(
+    counts: &mut BTreeMap<String, (u32, BTreeSet<String>)>,
+    command: &str,
+    source: &str,
+) -> bool {
+    let command = redact_secrets(command);
+    if !feels_commandlike(&command) {
+        return false;
+    }
+    let entry = counts
+        .entry(command)
+        .or_insert_with(|| (0, BTreeSet::new()));
+    entry.0 = entry.0.saturating_add(1);
+    entry.1.insert(source.to_string());
+    true
+}
+
+fn workdir_belongs_to_project(workdir: &Path, project_variants: &[PathBuf]) -> bool {
+    let workdir_variants = path_variants(workdir);
+    project_variants.iter().any(|project| {
+        workdir_variants
+            .iter()
+            .any(|workdir| paths_related(workdir, project))
+    })
+}
+
+enum CdNavigation {
+    NotCd,
+    Target(PathBuf),
+    Invalid,
+}
+
+fn parse_cd_navigation(piece: &str) -> CdNavigation {
+    let Some(words) = shlex::split(piece) else {
+        return CdNavigation::Invalid;
+    };
+    if words.first().map(String::as_str) == Some("command")
+        && words
+            .iter()
+            .skip(1)
+            .take_while(|word| word.starts_with('-'))
+            .any(|word| matches!(word.as_str(), "-v" | "-V"))
+    {
+        return CdNavigation::NotCd;
+    }
+    let start = command_start_index(&words, |_, _| {});
+    if words.get(start).map(String::as_str) != Some("cd") {
+        return CdNavigation::NotCd;
+    }
+    match &words[start..] {
+        [_, target] => CdNavigation::Target(PathBuf::from(target)),
+        [_, option, target] if option == "--" => CdNavigation::Target(PathBuf::from(target)),
+        _ => CdNavigation::Invalid,
     }
 }
 
 /// Split compound shell lines into individual candidates and normalize whitespace.
+#[cfg(test)]
 fn normalize_and_split(raw: &str) -> Vec<String> {
     let trimmed = raw.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || trimmed.contains('\n') {
         return Vec::new();
     }
 
-    // Always split `&&` / `;` chains so `cd <dir> && cargo test` yields the
-    // useful trailing command instead of being rejected as a bare `cd`.
-    let pieces: Vec<String> = if trimmed.contains("&&") || trimmed.contains(';') {
-        trimmed
-            .split("&&")
-            .flat_map(|chunk| chunk.split(';'))
-            .map(|piece| collapse_ws(piece.trim().trim_start_matches("then ").trim()))
-            .filter(|p| !p.is_empty())
-            .collect()
-    } else {
-        vec![collapse_ws(trimmed)]
-    };
+    // Split only unquoted `&&` / `;` operators so `cd <dir> && cargo test`
+    // yields the useful command without corrupting Python snippets, URLs, or
+    // other arguments that contain literal separators.
+    let pieces = split_shell_chains(trimmed)
+        .into_iter()
+        .map(|piece| collapse_unquoted_ws(piece.trim().trim_start_matches("then ").trim()))
+        .filter(|piece| !piece.is_empty())
+        .collect::<Vec<_>>();
 
     pieces
         .into_iter()
@@ -589,6 +787,94 @@ fn normalize_and_split(raw: &str) -> Vec<String> {
         .collect()
 }
 
+fn split_shell_chains(raw: &str) -> Vec<String> {
+    let mut pieces = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut chars = raw.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        match quote {
+            Some('\'') => {
+                current.push(ch);
+                if ch == '\'' {
+                    quote = None;
+                }
+            }
+            Some('"') => {
+                current.push(ch);
+                if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    quote = None;
+                }
+            }
+            Some(_) => unreachable!(),
+            None => match ch {
+                '\'' | '"' => {
+                    quote = Some(ch);
+                    current.push(ch);
+                }
+                '\\' => {
+                    current.push(ch);
+                    escaped = true;
+                }
+                ';' => {
+                    pieces.push(std::mem::take(&mut current));
+                }
+                '&' if chars.peek() == Some(&'&') => {
+                    chars.next();
+                    pieces.push(std::mem::take(&mut current));
+                }
+                _ => current.push(ch),
+            },
+        }
+    }
+    pieces.push(current);
+    pieces
+}
+
+fn collapse_unquoted_ws(raw: &str) -> String {
+    let mut output = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut pending_space = false;
+
+    for ch in raw.chars() {
+        if escaped {
+            output.push(ch);
+            escaped = false;
+            continue;
+        }
+        if quote.is_none() && ch.is_whitespace() {
+            pending_space = !output.is_empty();
+            continue;
+        }
+        if pending_space {
+            output.push(' ');
+            pending_space = false;
+        }
+        output.push(ch);
+        match quote {
+            Some('\'') if ch == '\'' => quote = None,
+            Some('"') if ch == '\\' => escaped = true,
+            Some('"') if ch == '"' => quote = None,
+            Some(_) => {}
+            None if ch == '\'' || ch == '"' => quote = Some(ch),
+            None if ch == '\\' => escaped = true,
+            None => {}
+        }
+    }
+    output
+}
+
+#[cfg(test)]
 fn strip_leading_cd(cmd: &str) -> String {
     let mut rest = cmd;
     loop {
@@ -609,6 +895,7 @@ fn strip_leading_cd(cmd: &str) -> String {
     }
 }
 
+#[cfg(test)]
 fn skip_one_shell_word(s: &str) -> &str {
     let bytes = s.as_bytes();
     if bytes.is_empty() {
@@ -642,10 +929,236 @@ fn skip_one_shell_word(s: &str) -> &str {
 /// Redact inline env assignments / tokens that look like secrets before a
 /// mined command is stored in `.qr/profile.json`.
 fn redact_secrets(cmd: &str) -> String {
-    cmd.split_whitespace()
-        .map(redact_token)
-        .collect::<Vec<_>>()
-        .join(" ")
+    let spans = shell_word_spans(cmd);
+    let (tool, subcommand) = command_tool_context(cmd);
+    let mut output = String::with_capacity(cmd.len());
+    let mut cursor = 0;
+    let mut redact_next = None;
+    for (start, end) in spans {
+        output.push_str(&cmd[cursor..start]);
+        let token = &cmd[start..end];
+        match redact_next.take() {
+            Some(PendingRedaction::SecretValue) => output.push_str("***"),
+            Some(PendingRedaction::HeaderValue) if is_auth_header(token) => {
+                output.push_str("***");
+            }
+            Some(PendingRedaction::HeaderValue) | None => {
+                if let Some(redacted) = redact_inline_context_token(
+                    &tool,
+                    subcommand.as_deref(),
+                    token.trim_matches(['\'', '"']),
+                ) {
+                    output.push_str(&redacted);
+                    cursor = end;
+                    continue;
+                }
+                output.push_str(&redact_token(token));
+                let flag = token.trim_matches(['\'', '"']);
+                if !token.contains('=')
+                    && (is_secret_value_flag(token)
+                        || is_context_secret_flag(&tool, subcommand.as_deref(), flag))
+                {
+                    redact_next = Some(PendingRedaction::SecretValue);
+                } else if tool == "curl" && matches!(flag, "-H" | "--header") {
+                    redact_next = Some(PendingRedaction::HeaderValue);
+                }
+            }
+        }
+        cursor = end;
+    }
+    output.push_str(&cmd[cursor..]);
+    output
+}
+
+#[derive(Clone, Copy)]
+enum PendingRedaction {
+    SecretValue,
+    HeaderValue,
+}
+
+fn command_tool_context(command: &str) -> (String, Option<String>) {
+    let Some(words) = shlex::split(command) else {
+        return (String::new(), None);
+    };
+    let index = command_start_index(&words, |_, _| {});
+    let tool = words
+        .get(index)
+        .and_then(|word| word.rsplit('/').next())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let subcommand = words.get(index + 1).map(|word| word.to_ascii_lowercase());
+    (tool, subcommand)
+}
+
+fn shell_assignment(word: &str) -> Option<(&str, &str)> {
+    if word.starts_with('-') {
+        return None;
+    }
+    let (name, value) = word.split_once('=')?;
+    (!name.is_empty()).then_some((name, value))
+}
+
+fn command_start_index(words: &[String], mut assignment: impl FnMut(&str, &str)) -> usize {
+    let mut index = 0;
+    loop {
+        while let Some((name, value)) = words.get(index).and_then(|word| shell_assignment(word)) {
+            assignment(name, value);
+            index += 1;
+        }
+        let wrapper = words
+            .get(index)
+            .and_then(|word| word.rsplit('/').next())
+            .unwrap_or("");
+        match wrapper {
+            "env" => {
+                index += 1;
+                while index < words.len() {
+                    if matches!(words[index].as_str(), "-u" | "--unset") {
+                        if let Some(name) = words.get(index + 1) {
+                            assignment(name, "");
+                        }
+                        index = (index + 2).min(words.len());
+                    } else if let Some(name) = words[index].strip_prefix("--unset=") {
+                        assignment(name, "");
+                        index += 1;
+                    } else if matches!(
+                        words[index].as_str(),
+                        "-C" | "--chdir" | "-S" | "--split-string" | "-a" | "--argv0"
+                    ) {
+                        index = (index + 2).min(words.len());
+                    } else if let Some((name, value)) = shell_assignment(&words[index]) {
+                        assignment(name, value);
+                        index += 1;
+                    } else if words[index].starts_with('-') {
+                        index += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            "sudo" => {
+                index += 1;
+                while index < words.len() && words[index].starts_with('-') {
+                    let consumes_value = matches!(
+                        words[index].as_str(),
+                        "-u" | "--user"
+                            | "-g"
+                            | "--group"
+                            | "-h"
+                            | "--host"
+                            | "-p"
+                            | "--prompt"
+                            | "-C"
+                            | "--close-from"
+                            | "-R"
+                            | "--chroot"
+                            | "-D"
+                            | "--chdir"
+                    );
+                    index += if consumes_value { 2 } else { 1 };
+                    index = index.min(words.len());
+                }
+            }
+            "command" | "builtin" => {
+                index += 1;
+                while index < words.len() && words[index].starts_with('-') {
+                    index += 1;
+                }
+            }
+            _ => return index,
+        }
+    }
+}
+
+fn is_context_secret_flag(tool: &str, subcommand: Option<&str>, flag: &str) -> bool {
+    (tool == "docker" && subcommand == Some("login") && flag == "-p")
+        || (tool == "curl" && matches!(flag, "-u" | "--user" | "--proxy-user"))
+}
+
+fn redact_inline_context_token(
+    tool: &str,
+    subcommand: Option<&str>,
+    token: &str,
+) -> Option<String> {
+    if tool == "docker" && subcommand == Some("login") {
+        if token.starts_with("-p=") {
+            return Some("-p=***".into());
+        }
+        if token.starts_with("-p") && token.len() > 2 {
+            return Some("-p***".into());
+        }
+    }
+    if tool != "curl" {
+        return None;
+    }
+    for flag in ["--user=", "--proxy-user="] {
+        if token.starts_with(flag) {
+            return Some(format!("{flag}***"));
+        }
+    }
+    if token.starts_with("-u") && token.len() > 2 {
+        return Some("-u***".into());
+    }
+    for flag in ["--header=", "-H"] {
+        if let Some(value) = token.strip_prefix(flag) {
+            let value = value.strip_prefix('=').unwrap_or(value);
+            if is_auth_header(value) {
+                return Some(format!("{flag}***"));
+            }
+        }
+    }
+    None
+}
+
+fn is_auth_header(token: &str) -> bool {
+    let token = token.trim_matches(['\'', '"']).to_ascii_lowercase();
+    token.starts_with("authorization:") || token.starts_with("proxy-authorization:")
+}
+
+fn shell_word_spans(cmd: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start = None;
+    let mut quote = None;
+    let mut escaped = false;
+
+    for (index, ch) in cmd.char_indices() {
+        if start.is_none() {
+            if ch.is_whitespace() {
+                continue;
+            }
+            start = Some(index);
+        }
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match quote {
+            Some('\'') if ch == '\'' => quote = None,
+            Some('"') if ch == '\\' => escaped = true,
+            Some('"') if ch == '"' => quote = None,
+            Some(_) => {}
+            None if ch == '\'' || ch == '"' => quote = Some(ch),
+            None if ch == '\\' => escaped = true,
+            None if ch.is_whitespace() => {
+                spans.push((start.take().expect("word has a start"), index));
+            }
+            None => {}
+        }
+    }
+    if let Some(start) = start {
+        spans.push((start, cmd.len()));
+    }
+    spans
+}
+
+fn is_secret_value_flag(token: &str) -> bool {
+    let token = token.trim_matches(['\'', '"']);
+    if !token.starts_with('-') {
+        return false;
+    }
+    let name = token.trim_start_matches('-').trim_end_matches([':', '=']);
+    let normalized = name.to_ascii_lowercase().replace('_', "-");
+    !name.is_empty() && !normalized.ends_with("-stdin") && looks_secret_name(name)
 }
 
 fn redact_token(token: &str) -> String {
@@ -661,7 +1174,21 @@ fn redact_token(token: &str) -> String {
     if looks_secret_literal(token) {
         return "***".to_string();
     }
+    if contains_url_userinfo(token) {
+        return "***".to_string();
+    }
     token.to_string()
+}
+
+fn contains_url_userinfo(token: &str) -> bool {
+    let token = token.trim_matches(['\'', '"']);
+    let Some((_, rest)) = token.split_once("://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    authority
+        .split_once('@')
+        .is_some_and(|(userinfo, _)| !userinfo.is_empty())
 }
 
 fn looks_secret_name(name: &str) -> bool {
@@ -691,10 +1218,6 @@ fn looks_secret_literal(token: &str) -> bool {
         return true;
     }
     false
-}
-
-fn collapse_ws(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Policy: keep project-task-like shell commands; drop pure inspection noise.
@@ -948,6 +1471,10 @@ fn paths_related(cwd: &Path, project: &Path) -> bool {
     cwd == project || cwd.starts_with(project)
 }
 
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    paths_related(left, right) || paths_related(right, left)
+}
+
 fn shell_join(parts: &[&str]) -> String {
     parts
         .iter()
@@ -991,57 +1518,173 @@ fn fill_role_from_mined(
     profile: &mut crate::project_profile::ProjectProfile,
     mined: &[MinedCommand],
 ) {
-    let pick = |pred: fn(&str) -> bool| -> Option<String> {
+    let pick = |role: MinedRole| -> Option<String> {
         mined
             .iter()
-            .find(|m| pred(&m.command))
+            .find(|m| command_matches_role(&m.command, role))
             .map(|m| m.command.clone())
     };
 
     if profile.test_command.is_none() {
-        profile.test_command = pick(|c| {
-            let t = c.to_ascii_lowercase();
-            t.contains("pytest")
-                || t.contains("vitest")
-                || t.contains("nextest")
-                || t.contains("jest")
-                || t.contains("cargo test")
-                || t.contains("go test")
-                || t.split_whitespace().any(|w| w == "test")
-        });
+        profile.test_command = pick(MinedRole::Test);
     }
     if profile.build_command.is_none() {
-        profile.build_command = pick(|c| {
-            let t = c.to_ascii_lowercase();
-            t.contains(" build") || t.ends_with(" build") || t.contains("cargo build")
-        });
+        profile.build_command = pick(MinedRole::Build);
     }
     if profile.lint_command.is_none() {
-        profile.lint_command = pick(|c| {
-            let t = c.to_ascii_lowercase();
-            t.contains("lint") || t.contains("clippy") || t.contains("eslint") || t.contains("ruff")
-        });
+        profile.lint_command = pick(MinedRole::Lint);
     }
     if profile.dev_command.is_none() {
-        profile.dev_command = pick(|c| {
-            let t = c.to_ascii_lowercase();
-            t.contains(" dev")
-                || t.ends_with(" dev")
-                || t.contains("--reload")
-                || t.contains("runserver")
-        });
+        profile.dev_command = pick(MinedRole::Dev);
     }
     if profile.run_command.is_none() {
-        profile.run_command = pick(|c| {
-            let t = c.to_ascii_lowercase();
-            t.contains(" start") || t.contains("cargo run") || t.contains("go run")
-        });
+        profile.run_command = pick(MinedRole::Run);
     }
     if profile.debug_command.is_none() {
-        profile.debug_command = pick(|c| {
-            let t = c.to_ascii_lowercase();
-            t.contains("debug") || t.contains("backtrace") || t.contains("--inspect")
-        });
+        profile.debug_command = pick(MinedRole::Debug);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum MinedRole {
+    Test,
+    Build,
+    Lint,
+    Dev,
+    Run,
+    Debug,
+}
+
+fn command_matches_role(command: &str, role: MinedRole) -> bool {
+    let Some(words) = shlex::split(command) else {
+        return false;
+    };
+    let mut backtrace_enabled = None;
+    let start = command_start_index(&words, |name, value| {
+        if name.eq_ignore_ascii_case("RUST_BACKTRACE") {
+            backtrace_enabled = Some(!value.is_empty() && value != "0");
+        }
+    });
+    let mut command_words = &words[start..];
+    while command_words.len() >= 2
+        && matches!(
+            command_words[0]
+                .rsplit('/')
+                .next()
+                .unwrap_or(&command_words[0]),
+            "uv" | "pipenv" | "poetry"
+        )
+        && command_words[1] == "run"
+    {
+        command_words = &command_words[2..];
+    }
+    let Some(first) = command_words.first() else {
+        return false;
+    };
+    let tool = first.rsplit('/').next().unwrap_or(first.as_str());
+    let args = &command_words[1..];
+    let subcommand = args.first().map(String::as_str).unwrap_or("");
+    let package_script = || {
+        if subcommand == "run" {
+            args.get(1).map(String::as_str)
+        } else if !subcommand.starts_with('-') {
+            Some(subcommand)
+        } else {
+            None
+        }
+    };
+    let target_matches = |target: Option<&str>, expected: &str| {
+        target
+            .is_some_and(|target| target == expected || target.starts_with(&format!("{expected}:")))
+    };
+
+    match role {
+        MinedRole::Test => match tool {
+            "cargo" => {
+                subcommand == "test"
+                    || (subcommand == "nextest" && args.get(1).is_some_and(|arg| arg == "run"))
+            }
+            "go" => subcommand == "test",
+            "npm" | "pnpm" | "yarn" | "bun" => target_matches(package_script(), "test"),
+            "make" | "just" => target_matches(
+                args.iter()
+                    .find(|arg| !arg.starts_with('-'))
+                    .map(String::as_str),
+                "test",
+            ),
+            "pytest" | "vitest" | "jest" | "nextest" | "cargo-nextest" => true,
+            "python" | "python3" => args
+                .windows(2)
+                .any(|pair| pair[0] == "-m" && pair[1] == "pytest"),
+            _ => false,
+        },
+        MinedRole::Build => match tool {
+            "cargo" | "go" | "docker" => subcommand == "build",
+            "npm" | "pnpm" | "yarn" | "bun" => target_matches(package_script(), "build"),
+            "make" | "just" => target_matches(
+                args.iter()
+                    .find(|arg| !arg.starts_with('-'))
+                    .map(String::as_str),
+                "build",
+            ),
+            _ => false,
+        },
+        MinedRole::Lint => match tool {
+            "cargo" => subcommand == "clippy",
+            "npm" | "pnpm" | "yarn" | "bun" => target_matches(package_script(), "lint"),
+            "make" | "just" => target_matches(
+                args.iter()
+                    .find(|arg| !arg.starts_with('-'))
+                    .map(String::as_str),
+                "lint",
+            ),
+            "eslint" | "ruff" => true,
+            _ => false,
+        },
+        MinedRole::Dev => match tool {
+            "npm" | "pnpm" | "yarn" | "bun" => target_matches(package_script(), "dev"),
+            "make" | "just" => target_matches(
+                args.iter()
+                    .find(|arg| !arg.starts_with('-'))
+                    .map(String::as_str),
+                "dev",
+            ),
+            "next" => subcommand == "dev",
+            "vite" => true,
+            "uvicorn" => args.iter().any(|arg| arg == "--reload"),
+            "python" | "python3" => args.iter().any(|arg| arg == "runserver"),
+            _ => false,
+        },
+        MinedRole::Run => match tool {
+            "cargo" | "go" => subcommand == "run",
+            "npm" | "pnpm" | "yarn" | "bun" => {
+                target_matches(package_script(), "start") || target_matches(package_script(), "run")
+            }
+            "make" | "just" => target_matches(
+                args.iter()
+                    .find(|arg| !arg.starts_with('-'))
+                    .map(String::as_str),
+                "run",
+            ),
+            "next" => subcommand == "start",
+            _ => false,
+        },
+        MinedRole::Debug => {
+            if backtrace_enabled == Some(true) {
+                return true;
+            }
+            match tool {
+                "npm" | "pnpm" | "yarn" | "bun" => target_matches(package_script(), "debug"),
+                "make" | "just" => target_matches(
+                    args.iter()
+                        .find(|arg| !arg.starts_with('-'))
+                        .map(String::as_str),
+                    "debug",
+                ),
+                "node" => args.iter().any(|arg| arg.starts_with("--inspect")),
+                _ => false,
+            }
+        }
     }
 }
 
@@ -1085,6 +1728,21 @@ mod tests {
     }
 
     #[test]
+    fn normalize_preserves_quoted_shell_separators_and_whitespace() {
+        let parts = normalize_and_split(r#"python -c 'print("a;b && c")' && cargo test"#);
+        assert_eq!(
+            parts,
+            vec![
+                r#"python -c 'print("a;b && c")'"#.to_string(),
+                "cargo test".to_string(),
+            ]
+        );
+
+        let parts = normalize_and_split("printf 'a  b'");
+        assert_eq!(parts, vec!["printf 'a  b'".to_string()]);
+    }
+
+    #[test]
     fn redact_secrets_masks_env_assignments_and_token_literals() {
         assert_eq!(
             redact_secrets("AWS_SECRET_ACCESS_KEY=deadbeef cargo test"),
@@ -1097,6 +1755,66 @@ mod tests {
         assert_eq!(
             redact_secrets("curl -H sk-abcdefghijklmnopqrstuvwxyz https://example.com"),
             "curl -H *** https://example.com"
+        );
+        assert_eq!(
+            redact_secrets("deploy --token opaque-secret cargo test"),
+            "deploy --token *** cargo test"
+        );
+        assert_eq!(
+            redact_secrets("docker login --password hunter2 registry.example.com"),
+            "docker login --password *** registry.example.com"
+        );
+        assert_eq!(
+            redact_secrets("docker login --password 'correct horse' registry.example.com"),
+            "docker login --password *** registry.example.com"
+        );
+        assert_eq!(
+            redact_secrets("cargo test -- --exact 'a  b'"),
+            "cargo test -- --exact 'a  b'"
+        );
+        assert_eq!(
+            redact_secrets("docker login --password-stdin registry.example.com"),
+            "docker login --password-stdin registry.example.com"
+        );
+        assert_eq!(
+            redact_secrets(r#"curl -H "Authorization: Bearer opaque-secret" https://example.com"#),
+            "curl -H *** https://example.com"
+        );
+        assert_eq!(
+            redact_secrets("docker login -p hunter2 registry.example.com"),
+            "docker login -p *** registry.example.com"
+        );
+        assert_eq!(
+            redact_secrets("curl -u alice:hunter2 https://example.com"),
+            "curl -u *** https://example.com"
+        );
+        assert_eq!(
+            redact_secrets("curl https://alice:hunter2@example.com/status"),
+            "curl ***"
+        );
+        assert_eq!(
+            redact_secrets("curl --user=alice:hunter2 https://example.com"),
+            "curl --user=*** https://example.com"
+        );
+        assert_eq!(
+            redact_secrets("curl -ualice:hunter2 https://example.com"),
+            "curl -u*** https://example.com"
+        );
+        assert_eq!(
+            redact_secrets("curl --header=Authorization:Bearer_opaque https://example.com"),
+            "curl --header=*** https://example.com"
+        );
+        assert_eq!(
+            redact_secrets("sudo -u root docker login -p hunter2 registry.example.com"),
+            "sudo -u root docker login -p *** registry.example.com"
+        );
+        assert_eq!(
+            redact_secrets("curl https://ghp_secret@github.com/org/repo"),
+            "curl ***"
+        );
+        assert_eq!(
+            redact_secrets("env -C /tmp curl -u alice:hunter2 https://example.com"),
+            "env -C /tmp curl -u *** https://example.com"
         );
         // Non-secret env assignments are preserved.
         assert_eq!(
@@ -1115,8 +1833,56 @@ mod tests {
     }
 
     #[test]
-    fn escape_like_literal_escapes_wildcards() {
-        assert_eq!(escape_like_literal(r"a_b%c\d"), r"a\_b\%c\\d");
+    fn opencode_path_matching_is_case_sensitive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("opencode.db");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT);\n\
+             CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT, directory TEXT);\n\
+             CREATE TABLE part (session_id TEXT, data TEXT);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session (id, directory) VALUES (?1, ?2)",
+            rusqlite::params!["wanted", "/work/App"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session (id, directory) VALUES (?1, ?2)",
+            rusqlite::params!["sibling", "/work/app/sub"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO part (session_id, data) VALUES (?1, ?2)",
+            rusqlite::params![
+                "wanted",
+                r#"{"type":"tool","tool":"bash","state":{"input":{"command":"cargo test"}}}"#
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO part (session_id, data) VALUES (?1, ?2)",
+            rusqlite::params![
+                "sibling",
+                r#"{"type":"tool","tool":"bash","state":{"input":{"command":"cargo build"}}}"#
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let roots = AgentHistoryRoots {
+            opencode_db: Some(db),
+            ..AgentHistoryRoots::default()
+        };
+        let mined = mine_for_project_with_roots(Path::new("/work/App"), &roots);
+        let commands = mined
+            .iter()
+            .map(|item| item.command.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(commands.contains(&"cargo test"), "{commands:?}");
+        assert!(!commands.contains(&"cargo build"), "{commands:?}");
     }
 
     #[test]
@@ -1127,13 +1893,16 @@ mod tests {
         let home = tmp.path().join("home");
         let enc = project.to_string_lossy().replace('/', "-");
         let session = home.join(".claude/projects").join(&enc).join("sess.jsonl");
+        let cwd_line = serde_json::json!({ "cwd": project }).to_string();
         write_jsonl(
             &session,
             &[
+                &cwd_line,
                 r#"{"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo test"}}]}}"#,
                 r#"{"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo test"}}]}}"#,
                 r#"{"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls -la"}}]}}"#,
-                r#"{"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cd /repo && cargo nextest run"}}]}}"#,
+                r#"{"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cd . && cargo nextest run"}}]}}"#,
+                r#"{"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo check && cd ../sibling && ./deploy-prod"}}]}}"#,
                 r#"{"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz cargo build"}}]}}"#,
             ],
         );
@@ -1146,12 +1915,41 @@ mod tests {
         let cmds: Vec<_> = mined.iter().map(|m| m.command.as_str()).collect();
         assert!(cmds.contains(&"cargo test"), "{cmds:?}");
         assert!(cmds.contains(&"cargo nextest run"), "{cmds:?}");
+        assert!(!cmds.contains(&"./deploy-prod"), "{cmds:?}");
         assert!(
             cmds.iter()
                 .any(|c| c.contains("OPENAI_API_KEY=***") && c.contains("cargo build")),
             "{cmds:?}"
         );
         assert!(!cmds.iter().any(|c| c.contains("sk-")), "{cmds:?}");
+    }
+
+    #[test]
+    fn encoded_directory_collision_does_not_cross_project_boundaries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("a").join("b-c");
+        let other_project = tmp.path().join("a-b").join("c");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&other_project).unwrap();
+        let root = tmp.path().join("claude-projects");
+        let encoding = project.to_string_lossy().replace('/', "-");
+        assert_eq!(encoding, other_project.to_string_lossy().replace('/', "-"));
+        let session = root.join(encoding).join("other.jsonl");
+        write_jsonl(
+            &session,
+            &[
+                &serde_json::json!({ "cwd": other_project }).to_string(),
+                r#"{"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo test -p other"}}]}}"#,
+            ],
+        );
+
+        let roots = AgentHistoryRoots {
+            claude_projects: Some(root),
+            ..AgentHistoryRoots::default()
+        };
+        let mined = mine_for_project_with_roots(&project, &roots);
+
+        assert!(mined.is_empty(), "{mined:?}");
     }
 
     #[test]
@@ -1166,9 +1964,11 @@ mod tests {
             .join(".omp/agent/sessions")
             .join(enc)
             .join("sess.jsonl");
+        let cwd_line = serde_json::json!({ "cwd": project }).to_string();
         write_jsonl(
             &session,
             &[
+                &cwd_line,
                 r#"{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"bash","arguments":{"command":"pnpm test"}}]}}"#,
                 r#"{"type":"custom","customType":"tool_execution_start","data":{"toolName":"bash","args":{"command":"pnpm build"}}}"#,
             ],
@@ -1195,6 +1995,7 @@ mod tests {
         write_jsonl(
             &session2,
             &[
+                &cwd_line,
                 r#"{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"bash","arguments":{"command":"pnpm test"}}]}}"#,
                 r#"{"type":"custom","customType":"tool_execution_start","data":{"toolName":"bash","args":{"command":"pnpm build"}}}"#,
             ],
@@ -1215,6 +2016,8 @@ mod tests {
         let sessions = tmp.path().join("sessions");
         let file = sessions.join("2026/07/01/rollout.jsonl");
         let project_s = project.to_string_lossy();
+        let sibling = tmp.path().join("sibling");
+        let sibling_s = sibling.to_string_lossy();
         write_jsonl(
             &file,
             &[
@@ -1222,6 +2025,13 @@ mod tests {
                     r#"{{"type":"session_meta","payload":{{"cwd":"{project_s}","session_id":"x"}}}}"#
                 ),
                 r#"{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cargo clippy\"}"}}"#,
+                &format!(
+                    r#"{{"type":"response_item","payload":{{"type":"function_call","name":"exec_command","arguments":"{{\"cmd\":\"cargo test -p sibling\",\"workdir\":\"{sibling_s}\"}}"}}}}"#
+                ),
+                r#"{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cargo check -p escaped\",\"workdir\":\"../sibling\"}"}}"#,
+                r#"{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cd ../sibling && ./deploy-prod\"}"}}"#,
+                r#"{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"command cd ../sibling && ./wrapped-deploy\"}"}}"#,
+                r#"{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"builtin cd ../sibling && ./builtin-deploy\"}"}}"#,
                 r#"{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"ls\"}"}}"#,
             ],
         );
@@ -1236,6 +2046,9 @@ mod tests {
                     r#"{{"type":"session_meta","payload":{{"cwd":"{parent}","session_id":"parent"}}}}"#
                 ),
                 r#"{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cargo build -p sibling\"}"}}"#,
+                &format!(
+                    r#"{{"type":"response_item","payload":{{"type":"function_call","name":"exec_command","arguments":"{{\"cmd\":\"cargo fmt\",\"workdir\":\"{project_s}\"}}"}}}}"#
+                ),
             ],
         );
 
@@ -1244,9 +2057,78 @@ mod tests {
             ..AgentHistoryRoots::default()
         };
         let mined = mine_for_project_with_roots(&project, &roots);
-        assert_eq!(mined.len(), 1);
-        assert_eq!(mined[0].command, "cargo clippy");
-        assert_eq!(mined[0].sources, vec!["codex".to_string()]);
+        let commands = mined
+            .iter()
+            .map(|item| item.command.as_str())
+            .collect::<Vec<_>>();
+        assert!(commands.contains(&"cargo clippy"), "{commands:?}");
+        assert!(commands.contains(&"cargo fmt"), "{commands:?}");
+        assert!(!commands.contains(&"cargo test -p sibling"), "{commands:?}");
+        assert!(
+            !commands.contains(&"cargo check -p escaped"),
+            "{commands:?}"
+        );
+        assert!(!commands.contains(&"./deploy-prod"), "{commands:?}");
+        assert!(!commands.contains(&"./wrapped-deploy"), "{commands:?}");
+        assert!(!commands.contains(&"./builtin-deploy"), "{commands:?}");
+        assert!(
+            !commands.contains(&"cargo build -p sibling"),
+            "{commands:?}"
+        );
+        assert!(mined.iter().all(|item| item.sources == ["codex"]));
+    }
+
+    #[test]
+    fn codex_scanning_keeps_valid_lines_before_corrupt_history_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("proj");
+        fs::create_dir_all(&project).unwrap();
+        let sessions = tmp.path().join("sessions");
+        let file = sessions.join("rollout.jsonl");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let mut output = fs::File::create(&file).unwrap();
+        writeln!(
+            output,
+            "{}",
+            serde_json::json!({
+                "type": "session_meta",
+                "payload": { "cwd": project, "session_id": "corrupt" }
+            })
+        )
+        .unwrap();
+        output
+            .write_all(
+                br#"{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cargo test\"}"}}"#,
+            )
+            .unwrap();
+        output.write_all(b"\n").unwrap();
+        output.write_all(&[0xff, b'\n']).unwrap();
+        drop(output);
+
+        let roots = AgentHistoryRoots {
+            codex_sessions: Some(sessions),
+            ..AgentHistoryRoots::default()
+        };
+        let mined = mine_for_project_with_roots(&project, &roots);
+
+        assert!(
+            mined.iter().any(|item| item.command == "cargo test"),
+            "{mined:?}"
+        );
+    }
+
+    #[test]
+    fn codex_scan_budget_counts_overlapping_sessions_without_commands() {
+        let mut scanned = 0;
+        for _ in 0..MAX_SESSION_FILES_PER_AGENT {
+            assert!(reserve_codex_session_scan(&mut scanned, true));
+        }
+        assert!(!reserve_codex_session_scan(&mut scanned, true));
+        assert_eq!(scanned, MAX_SESSION_FILES_PER_AGENT);
+
+        let mut unrelated = 0;
+        assert!(!reserve_codex_session_scan(&mut unrelated, false));
+        assert_eq!(unrelated, 0);
     }
 
     #[test]
@@ -1292,5 +2174,128 @@ mod tests {
             profile.scripts.get("agent:1").map(String::as_str),
             Some("cargo nextest run")
         );
+    }
+
+    #[test]
+    fn merge_does_not_treat_git_branch_names_as_command_roles() {
+        let mut profile = crate::project_profile::ProjectProfile {
+            name: "x".into(),
+            language: None,
+            framework: None,
+            package_manager: None,
+            test_command: None,
+            build_command: None,
+            lint_command: None,
+            dev_command: None,
+            run_command: None,
+            debug_command: None,
+            scripts: BTreeMap::new(),
+            prefer_agent: None,
+            entry_points: vec![],
+            agent_commands: vec![],
+        };
+        let mined = vec![
+            MinedCommand {
+                command: "git checkout test".into(),
+                count: 10,
+                sources: vec!["codex".into()],
+            },
+            MinedCommand {
+                command: "git switch dev".into(),
+                count: 9,
+                sources: vec!["codex".into()],
+            },
+            MinedCommand {
+                command: "cargo nextest run".into(),
+                count: 2,
+                sources: vec!["codex".into()],
+            },
+        ];
+
+        merge_mined_into_profile(&mut profile, mined);
+
+        assert_eq!(profile.test_command.as_deref(), Some("cargo nextest run"));
+        assert!(profile.dev_command.is_none());
+    }
+
+    #[test]
+    fn merge_does_not_treat_arbitrary_arguments_as_roles() {
+        let mut profile = crate::project_profile::ProjectProfile {
+            name: "x".into(),
+            language: None,
+            framework: None,
+            package_manager: None,
+            test_command: None,
+            build_command: None,
+            lint_command: None,
+            dev_command: None,
+            run_command: None,
+            debug_command: None,
+            scripts: BTreeMap::new(),
+            prefer_agent: None,
+            entry_points: vec![],
+            agent_commands: vec![],
+        };
+        let mined = vec![
+            MinedCommand {
+                command: "docker build --build-arg RUST_BACKTRACE=1 -t test .".into(),
+                count: 10,
+                sources: vec!["codex".into()],
+            },
+            MinedCommand {
+                command: "kubectl config use-context dev".into(),
+                count: 9,
+                sources: vec!["codex".into()],
+            },
+            MinedCommand {
+                command: "cargo nextest run".into(),
+                count: 2,
+                sources: vec!["codex".into()],
+            },
+            MinedCommand {
+                command: "npm run dev".into(),
+                count: 1,
+                sources: vec!["codex".into()],
+            },
+            MinedCommand {
+                command: "RUST_BACKTRACE=0 cargo run".into(),
+                count: 1,
+                sources: vec!["codex".into()],
+            },
+        ];
+
+        merge_mined_into_profile(&mut profile, mined);
+
+        assert_eq!(profile.test_command.as_deref(), Some("cargo nextest run"));
+        assert_eq!(
+            profile.build_command.as_deref(),
+            Some("docker build --build-arg RUST_BACKTRACE=1 -t test .")
+        );
+        assert_eq!(profile.dev_command.as_deref(), Some("npm run dev"));
+        assert!(profile.debug_command.is_none());
+    }
+
+    #[test]
+    fn debug_role_requires_an_enabled_leading_backtrace_assignment() {
+        assert!(command_matches_role(
+            "RUST_BACKTRACE=1 cargo run",
+            MinedRole::Debug
+        ));
+        assert!(command_matches_role(
+            "env RUST_BACKTRACE=full cargo run",
+            MinedRole::Debug
+        ));
+        assert!(!command_matches_role(
+            "RUST_BACKTRACE=0 cargo run",
+            MinedRole::Debug
+        ));
+        assert!(!command_matches_role(
+            "RUST_BACKTRACE= cargo run",
+            MinedRole::Debug
+        ));
+        assert!(!command_matches_role(
+            "docker build --build-arg RUST_BACKTRACE=1 .",
+            MinedRole::Debug
+        ));
     }
 }

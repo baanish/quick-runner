@@ -129,14 +129,14 @@ edition = "2024"
     let enc = project.to_string_lossy().replace('/', "-");
     let dest_sess = home.join(".claude/projects").join(&enc);
     fs::create_dir_all(&dest_sess).unwrap();
-    fs::write(
-        dest_sess.join("sess.jsonl"),
-        r#"{"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo nextest run"}}]}}
-{"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo nextest run"}}]}}
-{"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls -la"}}]}}
-"#,
-    )
-    .unwrap();
+    let session = [
+        serde_json::json!({ "cwd": &project }).to_string(),
+        r#"{"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo nextest run"}}]}}"#.into(),
+        r#"{"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo nextest run"}}]}}"#.into(),
+        r#"{"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls -la"}}]}}"#.into(),
+    ]
+    .join("\n");
+    fs::write(dest_sess.join("sess.jsonl"), format!("{session}\n")).unwrap();
 
     let original_home = std::env::var_os("HOME");
     unsafe {
