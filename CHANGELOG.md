@@ -18,6 +18,13 @@ adheres to [Semantic Versioning](https://semver.org/).
   from Claude, Codex, Pi, omp, and OpenCode session histories for the current
   project into `agent_commands` and may fill empty role fields.
 
+### Fixed
+- `qr learn` no longer treats plain `main.py` as FastAPI, invents `next lint`,
+  PM-qualifies Makefile/Justfile role commands on Node projects, or records
+  `cargo run` / `go run .` when no runnable binary/root main package exists.
+  Makefile `:=`/`?=` assignments and Justfile `set`/`export`/`alias` lines are
+  skipped; Pipenv projects get a `pipenv run` prefix like uv/poetry/pdm.
+
 ## [0.1.0] - 2026-07-02
 
 ### Added
