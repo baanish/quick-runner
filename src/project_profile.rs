@@ -198,7 +198,8 @@ fn detect_node_profile(root: &Path) -> Result<ProjectProfile> {
         if package_scripts.contains_key(name) {
             script_or_qualified(pm, &scripts, name)
         } else {
-            // Invented default: use the direct tool body, not PM-qualified.
+            // Invented / merged default: use the command body as-is (framework
+            // tool, `make …`, `just …`), not a PM-qualified missing script.
             scripts.get(name).cloned()
         }
     };
@@ -246,7 +247,8 @@ fn insert_node_framework_defaults(scripts: &mut BTreeMap<String, String>, framew
             insert_default(scripts, "dev", "next dev");
             insert_default(scripts, "build", "next build");
             insert_default(scripts, "start", "next start");
-            insert_default(scripts, "lint", "next lint");
+            // Do not invent `next lint`: Next.js 16 removed that command. Only
+            // promote lint when package.json (or another merger) already has it.
         }
         Some("vite") => {
             insert_default(scripts, "dev", "vite");
@@ -262,18 +264,22 @@ fn detect_rust_profile(root: &Path) -> Result<ProjectProfile> {
         .with_context(|| format!("Failed to read {}", root.join("Cargo.toml").display()))?;
     let toml: TomlValue = toml::from_str(&raw).context("Failed to parse Cargo.toml")?;
     let name = toml_name(&toml, "package", root);
+    let has_bin = cargo_has_bin_target(root, &toml);
 
     // Hardcoded Cargo defaults for the common developer loop. `.qr.toml` and
-    // Makefile/Justfile merges can override any of these later.
+    // Makefile/Justfile merges can override any of these later. Run-oriented
+    // commands are only filled when a binary target is present.
     let mut scripts = BTreeMap::new();
     scripts.insert("build".into(), "cargo build".into());
     scripts.insert("test".into(), "cargo test".into());
     scripts.insert("lint".into(), "cargo clippy".into());
     scripts.insert("fmt".into(), "cargo fmt".into());
     scripts.insert("check".into(), "cargo check".into());
-    scripts.insert("run".into(), "cargo run".into());
-    scripts.insert("dev".into(), "cargo run".into());
-    scripts.insert("debug".into(), "RUST_BACKTRACE=1 cargo run".into());
+    if has_bin {
+        scripts.insert("run".into(), "cargo run".into());
+        scripts.insert("dev".into(), "cargo run".into());
+        scripts.insert("debug".into(), "RUST_BACKTRACE=1 cargo run".into());
+    }
     scripts.insert("release".into(), "cargo build --release".into());
     scripts.insert("clean".into(), "cargo clean".into());
     scripts.insert("doc".into(), "cargo doc".into());
@@ -287,13 +293,27 @@ fn detect_rust_profile(root: &Path) -> Result<ProjectProfile> {
         test_command: Some("cargo test".into()),
         build_command: Some("cargo build".into()),
         lint_command: Some("cargo clippy".into()),
-        dev_command: Some("cargo run".into()),
-        run_command: Some("cargo run".into()),
-        debug_command: Some("RUST_BACKTRACE=1 cargo run".into()),
+        dev_command: has_bin.then(|| "cargo run".into()),
+        run_command: has_bin.then(|| "cargo run".into()),
+        debug_command: has_bin.then(|| "RUST_BACKTRACE=1 cargo run".into()),
         scripts,
         prefer_agent: None,
         entry_points: detect_entry_points(root, &["src/main.rs", "src/lib.rs", "src/bin/"]),
     })
+}
+
+/// True when the crate looks runnable via `cargo run` (bin target, `src/main.rs`,
+/// or `src/bin/`). Lib-only crates and virtual workspaces return false.
+fn cargo_has_bin_target(root: &Path, toml: &TomlValue) -> bool {
+    if root.join("src/main.rs").is_file() || root.join("src/bin").is_dir() {
+        return true;
+    }
+    // Explicit `[[bin]]` / `[bin]` entries in the manifest.
+    match toml.get("bin") {
+        Some(TomlValue::Array(bins)) if !bins.is_empty() => true,
+        Some(TomlValue::Table(_)) => true,
+        _ => false,
+    }
 }
 
 fn detect_python_profile(root: &Path) -> Result<ProjectProfile> {
@@ -303,25 +323,17 @@ fn detect_python_profile(root: &Path) -> Result<ProjectProfile> {
     let name = toml_name(&toml, "project", root);
     let package_manager = detect_python_package_manager(root);
 
-    let framework = if root.join("manage.py").is_file() {
-        Some("django".into())
-    } else if root.join("app.py").is_file() || root.join("main.py").is_file() {
-        // Heuristic: app.py/main.py often means FastAPI/Flask; prefer fastapi
-        // when the name appears in deps, otherwise leave as fastapi only when
-        // app.py exists (historical behavior) else None.
-        if python_dep_mentions(&toml, "fastapi") || root.join("app.py").is_file() {
-            Some("fastapi".into())
-        } else if python_dep_mentions(&toml, "flask") {
-            Some("flask".into())
-        } else {
-            Some("fastapi".into())
-        }
-    } else if python_dep_mentions(&toml, "django") {
+    let framework = if root.join("manage.py").is_file() || python_dep_mentions(&toml, "django") {
         Some("django".into())
     } else if python_dep_mentions(&toml, "fastapi") {
         Some("fastapi".into())
     } else if python_dep_mentions(&toml, "flask") {
         Some("flask".into())
+    } else if root.join("app.py").is_file() {
+        // Historical heuristic: bare `app.py` without declared deps still maps
+        // to FastAPI. Plain `main.py` alone does not — that falls through to
+        // the generic `python main.py` path.
+        Some("fastapi".into())
     } else {
         None
     };
@@ -385,12 +397,13 @@ fn detect_python_profile(root: &Path) -> Result<ProjectProfile> {
         }
     };
 
-    // Prefer `uv run` / `poetry run` prefixes when that PM is detected so the
-    // learned commands match how the project is actually invoked.
+    // Prefer `uv run` / `poetry run` / `pipenv run` prefixes when that PM is
+    // detected so the learned commands match how the project is actually invoked.
     let prefix = match package_manager.as_deref() {
         Some("uv") => Some("uv run"),
         Some("poetry") => Some("poetry run"),
         Some("pdm") => Some("pdm run"),
+        Some("pipenv") => Some("pipenv run"),
         _ => None,
     };
     if let Some(prefix) = prefix {
@@ -441,14 +454,21 @@ fn detect_go_profile(root: &Path) -> Result<ProjectProfile> {
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| fallback_name(root));
 
+    // Only emit `go run .` when the module root itself is a main package.
+    // Projects whose binaries live under `cmd/` keep build/test/lint but leave
+    // run/dev/debug unset (Makefile/Justfile/`.qr.toml` can still fill them).
+    let root_is_main = go_root_is_main_package(root);
+
     let mut scripts = BTreeMap::new();
     scripts.insert("build".into(), "go build ./...".into());
     scripts.insert("test".into(), "go test ./...".into());
     scripts.insert("lint".into(), "go vet ./...".into());
     scripts.insert("fmt".into(), "go fmt ./...".into());
-    scripts.insert("run".into(), "go run .".into());
-    scripts.insert("dev".into(), "go run .".into());
-    scripts.insert("debug".into(), "go run -race .".into());
+    if root_is_main {
+        scripts.insert("run".into(), "go run .".into());
+        scripts.insert("dev".into(), "go run .".into());
+        scripts.insert("debug".into(), "go run -race .".into());
+    }
     scripts.insert("clean".into(), "go clean".into());
     scripts.insert("tidy".into(), "go mod tidy".into());
 
@@ -460,13 +480,26 @@ fn detect_go_profile(root: &Path) -> Result<ProjectProfile> {
         test_command: Some("go test ./...".into()),
         build_command: Some("go build ./...".into()),
         lint_command: Some("go vet ./...".into()),
-        dev_command: Some("go run .".into()),
-        run_command: Some("go run .".into()),
-        debug_command: Some("go run -race .".into()),
+        dev_command: root_is_main.then(|| "go run .".into()),
+        run_command: root_is_main.then(|| "go run .".into()),
+        debug_command: root_is_main.then(|| "go run -race .".into()),
         scripts,
         prefer_agent: None,
         entry_points: detect_entry_points(root, &["main.go", "cmd/", "internal/"]),
     })
+}
+
+/// True when the module root looks like a runnable `main` package (`main.go`
+/// declaring `package main`). Nested `cmd/` binaries alone are not enough.
+fn go_root_is_main_package(root: &Path) -> bool {
+    let path = root.join("main.go");
+    let Ok(raw) = fs::read_to_string(path) else {
+        return false;
+    };
+    raw.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("//"))
+        .any(|line| line == "package main" || line.starts_with("package main;"))
 }
 
 fn apply_overrides(root: &Path, profile: &mut ProjectProfile) -> Result<()> {
@@ -676,13 +709,12 @@ fn fill_role_commands_from_scripts(profile: &mut ProjectProfile) {
             .as_deref()
             .is_some_and(|pm| matches!(pm, "npm" | "pnpm" | "yarn" | "bun"));
 
+    // Node role commands from package.json / framework defaults are set in
+    // `detect_node_profile`. Anything still empty here came from a later merge
+    // (Makefile/Justfile) and already has a runnable body — promote it as-is
+    // rather than rewriting as `npm run <missing-script>`.
     let resolve = |scripts: &BTreeMap<String, String>, key: &str| -> Option<String> {
-        let body = scripts.get(key)?;
-        if is_node {
-            qualify_script_command(profile.package_manager.as_deref(), key, Some(body.as_str()))
-        } else {
-            Some(body.clone())
-        }
+        scripts.get(key).cloned()
     };
 
     if profile.test_command.is_none() {
@@ -735,20 +767,30 @@ fn insert_default(scripts: &mut BTreeMap<String, String>, key: &str, value: &str
 }
 
 /// Parse simple Makefile targets (`name:`) and merge missing keys into scripts.
-/// Ignores special targets (`.PHONY`, pattern rules with `%`).
+/// Ignores special targets (`.PHONY`, pattern rules with `%`) and variable
+/// assignments (`:=`, `?=`, `::=`).
 fn merge_makefile_targets(root: &Path, scripts: &mut BTreeMap<String, String>) {
     let path = root.join("Makefile");
     let Ok(raw) = fs::read_to_string(path) else {
         return;
     };
-    for line in raw.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with('\t') {
+    for raw_line in raw.lines() {
+        // Recipe bodies are tab-indented; skip them before trimming so a body
+        // line that happens to contain `:` is not treated as a target header.
+        if raw_line.starts_with('\t') {
             continue;
         }
-        let Some(name) = line.split_once(':').map(|(n, _)| n.trim()) else {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((name, rest)) = line.split_once(':').map(|(n, r)| (n.trim(), r)) else {
             continue;
         };
+        // Skip variable assignments (`x := y`, `x ?= y`, `x ::= y`).
+        if rest.starts_with('=') {
+            continue;
+        }
         if name.is_empty()
             || name.starts_with('.')
             || name.contains('%')
@@ -767,6 +809,7 @@ fn merge_makefile_targets(root: &Path, scripts: &mut BTreeMap<String, String>) {
 }
 
 /// Parse Justfile recipe names (`name:` / `name arg:`) and merge missing keys.
+/// Skips assignments (`:=`), aliases, and `set`/`export` directives.
 fn merge_justfile_recipes(root: &Path, scripts: &mut BTreeMap<String, String>) {
     for filename in ["justfile", "Justfile"] {
         let path = root.join(filename);
@@ -778,17 +821,25 @@ fn merge_justfile_recipes(root: &Path, scripts: &mut BTreeMap<String, String>) {
             if line.is_empty() || line.starts_with('#') || line.starts_with('[') {
                 continue;
             }
-            // Recipe: `name:` or `name arg:` — take the first identifier.
+            // Assignments and settings use `:=` — never recipe headers.
+            if line.contains(":=") {
+                continue;
+            }
             let Some(first) = line.split_whitespace().next() else {
                 continue;
             };
+            // `alias name := recipe` already excluded by `:=` check; also skip
+            // bare `alias` / `set` / `export` / `import` keywords.
+            if matches!(first, "alias" | "set" | "export" | "import" | "mod") {
+                continue;
+            }
             let name = first.trim_end_matches(':');
             if name == first {
-                // No trailing colon on the first token — not a recipe header.
+                // No trailing colon on the first token — only a recipe if the
+                // line still has a `name args:` form (colon later on the line).
                 if !line.contains(':') {
                     continue;
                 }
-                // `name arg1 arg2:` form — name is first token without colon.
             }
             if name.is_empty()
                 || name.starts_with('@')
@@ -798,7 +849,6 @@ fn merge_justfile_recipes(root: &Path, scripts: &mut BTreeMap<String, String>) {
             {
                 continue;
             }
-            // Only treat as recipe if the line has a colon (recipe header).
             if !line.contains(':') {
                 continue;
             }
@@ -860,7 +910,7 @@ mod tests {
     #[test]
     fn node_framework_defaults_fill_missing_scripts() {
         // package.json declares next but omits scripts — learn fills framework
-        // defaults so the profile still carries build/dev/start/lint.
+        // defaults so the profile still carries build/dev/start.
         let tmp = tempfile::tempdir().unwrap();
         fs::write(
             tmp.path().join("package.json"),
@@ -887,6 +937,9 @@ mod tests {
         assert_eq!(profile.dev_command.as_deref(), Some("next dev"));
         assert_eq!(profile.build_command.as_deref(), Some("next build"));
         assert_eq!(profile.run_command.as_deref(), Some("next start"));
+        // Next.js 16 removed `next lint` — do not invent it.
+        assert!(!profile.scripts.contains_key("lint"));
+        assert!(profile.lint_command.is_none());
     }
 
     #[test]
@@ -913,6 +966,29 @@ mod tests {
     }
 
     #[test]
+    fn node_makefile_role_is_preserved_not_pm_qualified() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("package.json"),
+            r#"{ "name": "node-make", "packageManager": "pnpm@9.0.0" }"#,
+        )
+        .unwrap();
+        fs::write(
+            tmp.path().join("Makefile"),
+            "build:\n\techo build\ntest:\n\techo test\n",
+        )
+        .unwrap();
+
+        let profile = detect_profile(tmp.path()).unwrap();
+        assert_eq!(
+            profile.scripts.get("build").map(String::as_str),
+            Some("make build")
+        );
+        assert_eq!(profile.build_command.as_deref(), Some("make build"));
+        assert_eq!(profile.test_command.as_deref(), Some("make test"));
+    }
+
+    #[test]
     fn rust_profile_includes_common_commands() {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(
@@ -924,6 +1000,8 @@ edition = "2024"
 "#,
         )
         .unwrap();
+        fs::create_dir_all(tmp.path().join("src")).unwrap();
+        fs::write(tmp.path().join("src/main.rs"), "fn main() {}\n").unwrap();
 
         let profile = detect_profile(tmp.path()).unwrap();
         // Pinned common Cargo loop — if this fails after a refactor, update the
@@ -948,11 +1026,40 @@ edition = "2024"
     }
 
     #[test]
+    fn rust_lib_only_crate_omits_run_commands() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("Cargo.toml"),
+            r#"[package]
+name = "demo-lib"
+version = "0.1.0"
+edition = "2024"
+"#,
+        )
+        .unwrap();
+        fs::create_dir_all(tmp.path().join("src")).unwrap();
+        fs::write(tmp.path().join("src/lib.rs"), "").unwrap();
+
+        let profile = detect_profile(tmp.path()).unwrap();
+        assert_eq!(profile.test_command.as_deref(), Some("cargo test"));
+        assert_eq!(profile.build_command.as_deref(), Some("cargo build"));
+        assert!(profile.dev_command.is_none());
+        assert!(profile.run_command.is_none());
+        assert!(profile.debug_command.is_none());
+        assert!(!profile.scripts.contains_key("run"));
+    }
+
+    #[test]
     fn go_profile_includes_common_commands() {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(
             tmp.path().join("go.mod"),
             "module github.com/acme/svc\n\ngo 1.22\n",
+        )
+        .unwrap();
+        fs::write(
+            tmp.path().join("main.go"),
+            "package main\n\nfunc main() {}\n",
         )
         .unwrap();
 
@@ -964,6 +1071,28 @@ edition = "2024"
         assert_eq!(profile.dev_command.as_deref(), Some("go run ."));
         assert_eq!(profile.run_command.as_deref(), Some("go run ."));
         assert_eq!(profile.debug_command.as_deref(), Some("go run -race ."));
+    }
+
+    #[test]
+    fn go_cmd_only_module_omits_root_run_commands() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("go.mod"),
+            "module github.com/acme/svc\n\ngo 1.22\n",
+        )
+        .unwrap();
+        fs::create_dir_all(tmp.path().join("cmd/svc")).unwrap();
+        fs::write(
+            tmp.path().join("cmd/svc/main.go"),
+            "package main\n\nfunc main() {}\n",
+        )
+        .unwrap();
+
+        let profile = detect_profile(tmp.path()).unwrap();
+        assert_eq!(profile.build_command.as_deref(), Some("go build ./..."));
+        assert!(profile.dev_command.is_none());
+        assert!(profile.run_command.is_none());
+        assert!(profile.debug_command.is_none());
     }
 
     #[test]
@@ -993,6 +1122,56 @@ dependencies = ["fastapi"]
     }
 
     #[test]
+    fn plain_main_py_is_not_fastapi() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("pyproject.toml"),
+            r#"[project]
+name = "script-py"
+version = "0.1.0"
+dependencies = []
+"#,
+        )
+        .unwrap();
+        fs::write(tmp.path().join("main.py"), "print('hi')\n").unwrap();
+
+        let profile = detect_profile(tmp.path()).unwrap();
+        assert!(profile.framework.is_none());
+        assert_eq!(profile.dev_command.as_deref(), Some("python main.py"));
+        assert_eq!(profile.run_command.as_deref(), Some("python main.py"));
+        assert!(
+            !profile
+                .dev_command
+                .as_deref()
+                .unwrap_or("")
+                .contains("uvicorn")
+        );
+    }
+
+    #[test]
+    fn pipenv_project_prefixes_common_commands() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("pyproject.toml"),
+            r#"[project]
+name = "pipenv-py"
+version = "0.1.0"
+dependencies = ["flask"]
+"#,
+        )
+        .unwrap();
+        fs::write(tmp.path().join("Pipfile"), "[packages]\nflask = \"*\"\n").unwrap();
+
+        let profile = detect_profile(tmp.path()).unwrap();
+        assert_eq!(profile.package_manager.as_deref(), Some("pipenv"));
+        assert_eq!(profile.test_command.as_deref(), Some("pipenv run pytest"));
+        assert_eq!(
+            profile.dev_command.as_deref(),
+            Some("pipenv run flask run --debug")
+        );
+    }
+
+    #[test]
     fn makefile_targets_merge_into_scripts_without_clobbering() {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(
@@ -1000,10 +1179,14 @@ dependencies = ["fastapi"]
             "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
         )
         .unwrap();
+        fs::create_dir_all(tmp.path().join("src")).unwrap();
+        fs::write(tmp.path().join("src/main.rs"), "fn main() {}\n").unwrap();
         fs::write(
             tmp.path().join("Makefile"),
             "\
 .PHONY: test deploy
+CC := gcc
+test := should-not-be-a-target
 test:
 \tcargo nextest run
 deploy:
@@ -1022,6 +1205,76 @@ deploy:
             profile.scripts.get("deploy").map(String::as_str),
             Some("make deploy")
         );
+        assert!(!profile.scripts.contains_key("CC"));
+        // `test := …` must not invent a make target either (cargo already owns test).
+        assert_ne!(
+            profile.scripts.get("test").map(String::as_str),
+            Some("make test")
+        );
+    }
+
+    #[test]
+    fn makefile_assignment_only_project_does_not_invent_roles() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("package.json"),
+            r#"{ "name": "make-vars" }"#,
+        )
+        .unwrap();
+        fs::write(
+            tmp.path().join("Makefile"),
+            "VERSION := 1.2.3\ntest := pytest\nCC ?= gcc\n",
+        )
+        .unwrap();
+
+        let profile = detect_profile(tmp.path()).unwrap();
+        assert!(!profile.scripts.contains_key("VERSION"));
+        assert!(!profile.scripts.contains_key("test"));
+        assert!(!profile.scripts.contains_key("CC"));
+        assert!(profile.test_command.is_none());
+    }
+
+    #[test]
+    fn justfile_skips_assignments_and_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("package.json"),
+            r#"{ "name": "just-demo" }"#,
+        )
+        .unwrap();
+        fs::write(
+            tmp.path().join("justfile"),
+            r#"
+set shell := ["bash", "-cu"]
+export RUST_BACKTRACE := "1"
+target := "main"
+alias b := build
+
+build:
+    echo build
+
+test:
+    echo test
+"#,
+        )
+        .unwrap();
+
+        let profile = detect_profile(tmp.path()).unwrap();
+        assert_eq!(
+            profile.scripts.get("build").map(String::as_str),
+            Some("just build")
+        );
+        assert_eq!(
+            profile.scripts.get("test").map(String::as_str),
+            Some("just test")
+        );
+        assert!(!profile.scripts.contains_key("set"));
+        assert!(!profile.scripts.contains_key("export"));
+        assert!(!profile.scripts.contains_key("target"));
+        assert!(!profile.scripts.contains_key("alias"));
+        assert!(!profile.scripts.contains_key("b"));
+        assert_eq!(profile.build_command.as_deref(), Some("just build"));
+        assert_eq!(profile.test_command.as_deref(), Some("just test"));
     }
 
     #[test]
