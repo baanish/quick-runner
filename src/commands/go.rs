@@ -22,7 +22,7 @@ pub fn execute_live(config: &AppConfig) -> Result<GoResult> {
     let labels = cache
         .projects
         .iter()
-        .map(project_choice_label)
+        .map(live_project_choice_label)
         .collect::<Vec<_>>();
     let picker_start = std::time::Instant::now();
     let selected = project_at_picker_index(&cache.projects, picker::pick_live_index(&labels)?)?;
@@ -86,6 +86,14 @@ pub fn execute(config: &AppConfig, query: &str) -> Result<GoResult> {
 fn project_choice_label(entry: &ProjectEntry) -> String {
     format!(
         "{} ({})",
+        terminal::escape_untrusted(&entry.name),
+        terminal::escape_untrusted(&entry.path)
+    )
+}
+
+fn live_project_choice_label(entry: &ProjectEntry) -> String {
+    format!(
+        "{}\t{}",
         terminal::escape_untrusted(&entry.name),
         terminal::escape_untrusted(&entry.path)
     )
@@ -245,6 +253,20 @@ mod tests {
         assert_eq!(
             project_choice_label(&entry),
             "bad\\u{1b}[2J (/tmp/bad\\u{7})"
+        );
+    }
+
+    #[test]
+    fn live_project_choice_label_keeps_parenthesized_paths_unambiguous() {
+        let entry = ProjectEntry {
+            name: "demo".into(),
+            path: r"C:\Program Files (x86)\demo".into(),
+            source: "git".into(),
+        };
+
+        assert_eq!(
+            live_project_choice_label(&entry),
+            "demo\tC:\\Program Files (x86)\\demo"
         );
     }
 

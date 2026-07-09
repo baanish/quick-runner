@@ -7,6 +7,7 @@ use crossterm::{
     execute,
     terminal::{self, ClearType},
 };
+use unicode_width::UnicodeWidthStr;
 
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_BOLD: &str = "\x1b[1m";
@@ -370,8 +371,12 @@ fn split_live_label(label: &str) -> (&str, &str) {
 
 fn terminal_width() -> usize {
     terminal::size()
-        .map(|(width, _)| usize::from(width).max(40))
+        .map(|(width, _)| normalized_terminal_width(width))
         .unwrap_or(100)
+}
+
+fn normalized_terminal_width(width: u16) -> usize {
+    usize::from(width).max(1)
 }
 
 fn truncate_ansi(input: &str, max_width: usize) -> String {
@@ -381,7 +386,7 @@ fn truncate_ansi(input: &str, max_width: usize) -> String {
 
     let target = max_width.saturating_sub(1);
     let mut output = String::new();
-    let mut visible = 0usize;
+    let mut visible_text = String::new();
     let mut chars = input.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '\x1b' {
@@ -395,11 +400,13 @@ fn truncate_ansi(input: &str, max_width: usize) -> String {
             continue;
         }
 
-        if visible >= target {
+        let mut candidate = visible_text.clone();
+        candidate.push(ch);
+        if candidate.width() > target {
             break;
         }
         output.push(ch);
-        visible += 1;
+        visible_text = candidate;
     }
 
     output.push('…');
@@ -408,7 +415,7 @@ fn truncate_ansi(input: &str, max_width: usize) -> String {
 }
 
 fn visible_width(input: &str) -> usize {
-    let mut width = 0usize;
+    let mut visible = String::new();
     let mut chars = input.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '\x1b' {
@@ -418,10 +425,10 @@ fn visible_width(input: &str) -> usize {
                 }
             }
         } else {
-            width += 1;
+            visible.push(ch);
         }
     }
-    width
+    visible.width()
 }
 
 #[cfg(test)]
@@ -430,6 +437,23 @@ mod tests {
 
     fn labels(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    fn strip_ansi_codes(input: &str) -> String {
+        let mut output = String::new();
+        let mut chars = input.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\x1b' {
+                for next in chars.by_ref() {
+                    if next == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                output.push(ch);
+            }
+        }
+        output
     }
 
     #[test]
@@ -538,5 +562,28 @@ mod tests {
 
         assert!(visible_width(&lines[1]) <= 48);
         assert!(lines[1].contains('…'));
+    }
+
+    #[test]
+    fn terminal_width_is_not_inflated_on_narrow_terminals() {
+        assert_eq!(normalized_terminal_width(20), 20);
+    }
+
+    #[test]
+    fn live_filter_truncation_counts_unicode_terminal_cells() {
+        let output = truncate_ansi("界界界", 4);
+        let visible = strip_ansi_codes(&output);
+
+        assert!(unicode_width::UnicodeWidthStr::width(visible.as_str()) <= 4);
+        assert!(output.contains('…'));
+    }
+
+    #[test]
+    fn live_filter_truncation_counts_emoji_presentation_sequences() {
+        let output = truncate_ansi("#\u{fe0f}#\u{fe0f}#\u{fe0f}", 4);
+        let visible = strip_ansi_codes(&output);
+
+        assert!(unicode_width::UnicodeWidthStr::width(visible.as_str()) <= 4);
+        assert!(output.contains('…'));
     }
 }
