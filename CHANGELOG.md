@@ -12,6 +12,11 @@ adheres to [Semantic Versioning](https://semver.org/).
   defaults for Rust/Go/Python and framework-aware Node fallbacks (Next.js,
   Vite). Makefile targets and Justfile recipes are merged into `scripts`
   without clobbering manifest keys. `.qr.toml` can override the new fields.
+- Optional agent-history mining for `qr learn` (default **off**): when
+  `[learn].mine_agent_history = true` (prompted during `qr init`, or
+  `QR_LEARN_MINE_AGENT_HISTORY=true`), learn extracts bash/exec-like commands
+  from Claude, Codex, Pi, omp, and OpenCode session histories for the current
+  project into `agent_commands` and may fill empty role fields.
 
 ## [0.1.0] - 2026-07-02
 

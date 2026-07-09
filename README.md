@@ -10,10 +10,10 @@ QuickRunner (`qr`) is a fast Rust CLI for common developer shell workflows: jump
 - `qr stats` / `qr s`: aggregated command stats from a local SQLite database
 - `qr scan` / `qr x`: manual project rescan
 - `qr do <task>` / `qr d`: natural language → a shell command (run only after explicit confirmation) or a suggested coding-agent hand-off
-- `qr learn` / `qr l`: profile the current project (language, package manager, common build/test/dev/run/debug commands, scripts) into `./.qr/profile.json`
+- `qr learn` / `qr l`: profile the current project (language, package manager, common build/test/dev/run/debug commands, scripts) into `./.qr/profile.json`; optionally mines agent session histories when enabled
 - `qr config` / `qr c`: open `config.toml` in your editor (`qr config path` prints its location)
 - `qr doctor`: report the health and location of the config and project cache
-- `qr init` / `qr i`: creates config, installs the shell wrapper, optionally stores your AI key in the OS keychain, prompts to install an hourly rescan cron (default no), and runs an initial scan
+- `qr init` / `qr i`: creates config, installs the shell wrapper, optionally stores your AI key in the OS keychain, asks whether to mine coding-agent session histories during `qr learn` (default no), prompts to install an hourly rescan cron (default no), and runs an initial scan
 
 ## Install
 
@@ -33,7 +33,11 @@ Run `qr config path` to print the exact location:
 
 On first run after upgrading, QuickRunner automatically migrates an existing config from the legacy location (`~/.config/qr/` on Linux, `~/Library/Application Support/qr/` on macOS) into `~/.qr/`. Set `QR_CONFIG_DIR` to override the directory (used in tests and CI).
 
-Defaults come from [`config/default.toml`](config/default.toml). Common runtime settings also have `QR_*` environment overrides for automation and CI — e.g. `QR_PROJECT_ROOTS` (colon-separated), `QR_SCAN_DEPTH`, `QR_AI_MODEL`, and `QR_STATS_ENABLED`. See [`src/config.rs`](src/config.rs) for the supported override list.
+Defaults come from [`config/default.toml`](config/default.toml). Common runtime settings also have `QR_*` environment overrides for automation and CI — e.g. `QR_PROJECT_ROOTS` (colon-separated), `QR_SCAN_DEPTH`, `QR_AI_MODEL`, `QR_STATS_ENABLED`, and `QR_LEARN_MINE_AGENT_HISTORY`. See [`src/config.rs`](src/config.rs) for the supported override list.
+
+### Agent history mining (`qr learn`)
+
+When `[learn].mine_agent_history = true`, `qr learn` also scans local coding-agent session stores for shell commands run in that project (Claude Code, Codex, Pi, omp, OpenCode). Matches are ranked by frequency into `agent_commands` in `.qr/profile.json`. This is **off by default** because it reads session history; `qr init` asks once, and you can flip it later in `config.toml` or with `QR_LEARN_MINE_AGENT_HISTORY=true`.
 
 ### AI key
 

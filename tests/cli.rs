@@ -108,6 +108,71 @@ edition = "2024"
 }
 
 #[test]
+fn learn_mines_agent_history_when_enabled() {
+    let _guard = env_lock().lock().unwrap();
+    clear_test_env();
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("app");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join("Cargo.toml"),
+        r#"[package]
+name = "mine-demo"
+version = "0.1.0"
+edition = "2024"
+"#,
+    )
+    .unwrap();
+
+    // Synthetic Claude session under a fake HOME so default roots resolve.
+    let home = tmp.path().join("home");
+    let enc = project.to_string_lossy().replace('/', "-");
+    let dest_sess = home.join(".claude/projects").join(&enc);
+    fs::create_dir_all(&dest_sess).unwrap();
+    fs::write(
+        dest_sess.join("sess.jsonl"),
+        r#"{"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo nextest run"}}]}}
+{"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo nextest run"}}]}}
+{"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls -la"}}]}}
+"#,
+    )
+    .unwrap();
+
+    let original_home = std::env::var_os("HOME");
+    unsafe {
+        std::env::set_var("HOME", &home);
+        std::env::set_var("QR_LEARN_MINE_AGENT_HISTORY", "true");
+    }
+
+    let mut cmd = Command::cargo_bin("qr").unwrap();
+    cmd.current_dir(&project)
+        .env("HOME", &home)
+        .env("QR_LEARN_MINE_AGENT_HISTORY", "true")
+        .arg("learn")
+        .assert()
+        .success()
+        .stdout(contains("Agent-mined commands"));
+
+    let raw = fs::read_to_string(project.join(".qr/profile.json")).unwrap();
+    let profile: Value = serde_json::from_str(&raw).unwrap();
+    assert!(
+        profile["agent_commands"]
+            .as_array()
+            .is_some_and(|arr| !arr.is_empty()),
+        "expected agent_commands, got {raw}"
+    );
+    assert_eq!(profile["agent_commands"][0]["command"], "cargo nextest run");
+
+    unsafe {
+        std::env::remove_var("QR_LEARN_MINE_AGENT_HISTORY");
+        match original_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
+
+#[test]
 fn config_path_prints_config_file_path() {
     let _guard = env_lock().lock().unwrap();
     clear_test_env();

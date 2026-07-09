@@ -22,6 +22,20 @@ pub struct AppConfig {
     pub stats: StatsConfig,
     #[serde(rename = "do", default)]
     pub do_config: DoConfig,
+    /// Settings for `qr learn` (project profiling).
+    #[serde(default)]
+    pub learn: LearnConfig,
+}
+
+/// Config for `qr learn`. All fields default off / empty so existing
+/// `config.toml` files without a `[learn]` section keep working.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LearnConfig {
+    /// When true, `qr learn` mines bash/exec-like commands from coding-agent
+    /// session histories (Claude, Codex, Pi, omp, OpenCode) for the current
+    /// project. Default **false** — asked once during `qr init`.
+    #[serde(default)]
+    pub mine_agent_history: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -535,6 +549,9 @@ fn apply_env_overrides(config: &mut AppConfig) -> Result<()> {
     if let Ok(value) = env::var("QR_STATS_DB_PATH") {
         config.stats.db_path = value;
     }
+    if let Ok(value) = env::var("QR_LEARN_MINE_AGENT_HISTORY") {
+        config.learn.mine_agent_history = parse_bool(&value)?;
+    }
     Ok(())
 }
 
@@ -588,6 +605,7 @@ mod tests {
             "QR_AI_FALLBACK_API_KEY_ENV",
             "QR_STATS_ENABLED",
             "QR_STATS_DB_PATH",
+            "QR_LEARN_MINE_AGENT_HISTORY",
         ] {
             unsafe {
                 env::remove_var(key);
