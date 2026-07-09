@@ -202,33 +202,43 @@ pub fn pick_live_index(options: &[String]) -> Result<Option<usize>> {
     let per_page = 7usize;
     let mut rendered_lines = 0usize;
 
-    loop {
-        rendered_lines = render_live_filter(&state, per_page, rendered_lines)?;
-        if let Event::Key(key) = event::read()? {
-            if !should_handle_key_event(key.kind) {
-                continue;
+    let loop_result: Result<Option<usize>> = (|| {
+        loop {
+            rendered_lines = render_live_filter(&state, per_page, rendered_lines)?;
+            if let Event::Key(key) = event::read()? {
+                if !should_handle_key_event(key.kind) {
+                    continue;
+                }
+                match key.code {
+                    KeyCode::Enter => return Ok(state.selected_index()),
+                    KeyCode::Esc => return Ok(None),
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Ok(None);
+                    }
+                    KeyCode::Char(value) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        state.insert_char(value);
+                    }
+                    KeyCode::Backspace => state.backspace(),
+                    KeyCode::Down => state.move_down(),
+                    KeyCode::Up => state.move_up(),
+                    _ => {}
+                }
             }
-            match key.code {
-                KeyCode::Enter => {
-                    clear_live_filter(rendered_lines)?;
-                    return Ok(state.selected_index());
-                }
-                KeyCode::Esc => {
-                    clear_live_filter(rendered_lines)?;
-                    return Ok(None);
-                }
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    clear_live_filter(rendered_lines)?;
-                    return Ok(None);
-                }
-                KeyCode::Char(value) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    state.insert_char(value);
-                }
-                KeyCode::Backspace => state.backspace(),
-                KeyCode::Down => state.move_down(),
-                KeyCode::Up => state.move_up(),
-                _ => {}
-            }
+        }
+    })();
+
+    complete_live_filter(loop_result, || clear_live_filter(rendered_lines))
+}
+
+fn complete_live_filter<T>(result: Result<T>, cleanup: impl FnOnce() -> Result<()>) -> Result<T> {
+    match result {
+        Ok(value) => {
+            cleanup()?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = cleanup();
+            Err(error)
         }
     }
 }
@@ -567,6 +577,20 @@ mod tests {
     #[test]
     fn terminal_width_is_not_inflated_on_narrow_terminals() {
         assert_eq!(normalized_terminal_width(20), 20);
+    }
+
+    #[test]
+    fn live_filter_cleanup_runs_when_the_picker_loop_errors() {
+        let cleaned = std::cell::Cell::new(false);
+        let loop_result: Result<()> = Err(anyhow::anyhow!("read failed"));
+
+        let result = complete_live_filter(loop_result, || {
+            cleaned.set(true);
+            Ok(())
+        });
+
+        assert!(cleaned.get());
+        assert_eq!(result.unwrap_err().to_string(), "read failed");
     }
 
     #[test]
