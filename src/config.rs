@@ -775,6 +775,8 @@ db_path = "/tmp/file.db"
 
     #[test]
     fn migrate_legacy_config_rewrites_stats_db_path_under_legacy_dir() {
+        let _guard = test_env_lock().lock().unwrap();
+        clear_test_env();
         let root = tempfile::tempdir().unwrap();
         let legacy = root.path().join("legacy");
         let new_dir = root.path().join("new");
@@ -813,6 +815,8 @@ db_path = "{}"
 
     #[test]
     fn migrate_legacy_agent_defaults_rewrites_shipped_defaults() {
+        let _guard = test_env_lock().lock().unwrap();
+        clear_test_env();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         fs::write(
@@ -854,6 +858,8 @@ claude = "claude --dangerously-skip-permissions -p"
 
     #[test]
     fn migrate_legacy_agent_defaults_preserves_custom_agent_commands() {
+        let _guard = test_env_lock().lock().unwrap();
+        clear_test_env();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let custom_codex = "codex exec --model gpt-5";
@@ -936,6 +942,8 @@ db_path = "{}"
 
     #[test]
     fn migrate_legacy_config_preserves_custom_stats_db_filename() {
+        let _guard = test_env_lock().lock().unwrap();
+        clear_test_env();
         let root = tempfile::tempdir().unwrap();
         let legacy = root.path().join("legacy");
         let new_dir = root.path().join("new");

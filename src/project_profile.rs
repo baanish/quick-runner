@@ -396,9 +396,8 @@ fn qualify_script_command(
     match package_manager.unwrap_or("npm") {
         "pnpm" => Some(format!("pnpm {script_name}")),
         "yarn" => Some(format!("yarn {script_name}")),
-        _ => Some(format!("npm run {script_name}"))
-            .filter(|_| script_name != "test")
-            .or_else(|| Some("npm test".into())),
+        _ if script_name == "test" => Some("npm test".into()),
+        _ => Some(format!("npm run {script_name}")),
     }
 }
 
