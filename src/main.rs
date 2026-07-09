@@ -13,7 +13,7 @@ use quick_runner::{
     atomic, commands,
     commands::{alias::AliasCommand, config_cmd::ConfigArgs, go::GoResult},
     config::{
-        AgentConfig, AiConfig, AppConfig, DoConfig, FallbackAiConfig, GeneralConfig,
+        AgentConfig, AiConfig, AppConfig, DoConfig, FallbackAiConfig, GeneralConfig, LearnConfig,
         ProjectsConfig, StatsConfig, config_dir, config_file_path,
     },
     pricing, scanner, secret, shell,
@@ -322,6 +322,12 @@ fn execute_init(args: InitArgs) -> Result<()> {
         println!("Now let's configure your AI provider.");
         let ai_config = prompt_ai_config("primary")?;
 
+        // Default no: reading agent session histories is optional and private.
+        let mine_agent_history = prompt_bool(
+            "Mine common commands from coding agent session histories (Claude/Codex/Pi/omp/OpenCode) during qr learn?",
+            false,
+        )?;
+
         let config_content = toml::to_string_pretty(&AppConfig {
             general: GeneralConfig {
                 default_run_mode: "output".into(),
@@ -339,6 +345,7 @@ fn execute_init(args: InitArgs) -> Result<()> {
             do_config: DoConfig {
                 agents: AgentConfig::default(),
             },
+            learn: LearnConfig { mine_agent_history },
         })?;
 
         atomic::write_private(&config_path, config_content.as_bytes())?;

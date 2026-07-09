@@ -41,6 +41,20 @@ pub fn print_summary(result: &LearnResult) {
         let names = result.profile.scripts.keys().cloned().collect::<Vec<_>>();
         println!("  → Scripts: {}", names.join(", "));
     }
+    if !result.profile.agent_commands.is_empty() {
+        println!(
+            "  → Agent-mined commands: {} (top: {})",
+            result.profile.agent_commands.len(),
+            result
+                .profile
+                .agent_commands
+                .iter()
+                .take(5)
+                .map(|c| c.command.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     if !result.profile.entry_points.is_empty() {
         println!(
             "  → Entry points: {}",
