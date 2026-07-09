@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `qr learn` fills common developer-loop commands into `.qr/profile.json`:
+  `dev_command`, `run_command`, and `debug_command`, plus richer `scripts`
+  defaults for Rust/Go/Python and framework-aware Node fallbacks (Next.js,
+  Vite). Makefile targets and Justfile recipes are merged into `scripts`
+  without clobbering manifest keys. `.qr.toml` can override the new fields.
+
 ## [0.1.0] - 2026-07-02
 
 ### Added

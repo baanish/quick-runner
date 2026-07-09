@@ -56,7 +56,8 @@ fn learn_generates_profile_json_for_current_project() {
   "scripts": {
     "build": "next build",
     "test": "vitest run",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "dev": "next dev"
   },
   "dependencies": {
     "next": "15.0.0",
@@ -81,6 +82,7 @@ fn learn_generates_profile_json_for_current_project() {
     assert_eq!(profile["package_manager"], "pnpm");
     assert_eq!(profile["framework"], "nextjs");
     assert_eq!(profile["test_command"], "pnpm test");
+    assert_eq!(profile["dev_command"], "pnpm dev");
 }
 
 #[test]
