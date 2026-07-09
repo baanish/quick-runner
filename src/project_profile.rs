@@ -359,14 +359,17 @@ fn cargo_run_command(root: &Path, toml: &TomlValue) -> Option<String> {
                 .map(|path| root.join(path));
             let path = declared_path.or_else(|| {
                 let name = declared_name?;
-                let candidates = [
+                let mut candidates = vec![
                     root.join("src/bin").join(format!("{name}.rs")),
                     root.join("src/bin").join(name).join("main.rs"),
-                    root.join("src/main.rs"),
                 ];
+                if package_name == Some(name) {
+                    candidates.push(root.join("src/main.rs"));
+                }
                 candidates.into_iter().find(|candidate| candidate.is_file())
             });
-            if let Some(path) = &path {
+            let path = path.filter(|path| path.is_file())?;
+            if !explicit_paths.contains(&path) {
                 explicit_paths.push(path.clone());
             }
 
@@ -381,12 +384,10 @@ fn cargo_run_command(root: &Path, toml: &TomlValue) -> Option<String> {
                         !default_features.contains(required_feature)
                     })
                 });
-            if has_unavailable_required_feature || path.as_ref().is_none_or(|path| !path.is_file())
-            {
+            if has_unavailable_required_feature {
                 continue;
             }
             let name = declared_name.map(ToOwned::to_owned).or_else(|| {
-                let path = path.as_ref()?;
                 if path.file_name().and_then(|name| name.to_str()) == Some("main.rs") {
                     path.parent()?
                         .file_name()
@@ -2237,6 +2238,32 @@ derive = []
 
         assert!(profile.run_command.is_none());
         assert!(profile.dev_command.is_none());
+    }
+
+    #[test]
+    fn rust_unresolved_explicit_bin_does_not_fall_back_to_src_main() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("Cargo.toml"),
+            r#"[package]
+name = "primary"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "worker"
+"#,
+        )
+        .unwrap();
+        fs::create_dir_all(tmp.path().join("src")).unwrap();
+        fs::write(tmp.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+
+        let profile = detect_profile(tmp.path()).unwrap();
+
+        assert!(profile.run_command.is_none());
+        assert!(profile.dev_command.is_none());
+        assert!(profile.debug_command.is_none());
+        assert!(!profile.scripts.contains_key("run"));
     }
 
     #[test]
