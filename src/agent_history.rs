@@ -38,6 +38,10 @@ pub struct MinedCommand {
 /// Overrideable roots for agent session stores (tests inject fixtures here).
 #[derive(Debug, Clone, Default)]
 pub struct AgentHistoryRoots {
+    /// Optional home directory used only for omp relative path encodings.
+    /// Snapshotted once when resolving defaults so mining never re-reads
+    /// process env mid-scan (avoids racing tests that mutate `HOME`).
+    pub home: Option<PathBuf>,
     pub claude_projects: Option<PathBuf>,
     pub codex_sessions: Option<PathBuf>,
     pub pi_sessions: Option<PathBuf>,
@@ -49,6 +53,7 @@ impl AgentHistoryRoots {
     /// Default on-disk locations under the current user's home directory.
     pub fn from_home(home: &Path) -> Self {
         Self {
+            home: Some(home.to_path_buf()),
             claude_projects: Some(home.join(".claude/projects")),
             codex_sessions: Some(home.join(".codex/sessions")),
             pi_sessions: Some(home.join(".pi/agent/sessions")),
@@ -87,12 +92,14 @@ pub fn mine_for_project_with_roots(
         .unwrap_or_else(|| project_root.to_path_buf());
     let mut counts: BTreeMap<String, (u32, BTreeSet<String>)> = BTreeMap::new();
 
+    let home = roots.home.as_deref();
     if let Some(dir) = &roots.claude_projects {
         collect_from_dir_encoded(
             dir,
             &project,
             "claude",
             &claude_path_encodings(&project_variants),
+            home,
             extract_claude_commands,
             &mut counts,
         );
@@ -106,6 +113,7 @@ pub fn mine_for_project_with_roots(
             &project,
             "pi",
             &pi_path_encodings(&project_variants),
+            home,
             extract_pi_omp_commands,
             &mut counts,
         );
@@ -117,7 +125,8 @@ pub fn mine_for_project_with_roots(
             dir,
             &project,
             "omp",
-            &omp_path_encodings(&project_variants),
+            &omp_path_encodings(&project_variants, home),
+            home,
             extract_pi_omp_commands,
             &mut counts,
         );
@@ -163,6 +172,7 @@ fn collect_from_dir_encoded(
     project: &Path,
     source: &str,
     encodings: &[String],
+    home: Option<&Path>,
     extract: fn(&str) -> Vec<String>,
     counts: &mut BTreeMap<String, (u32, BTreeSet<String>)>,
 ) {
@@ -182,7 +192,7 @@ fn collect_from_dir_encoded(
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if (encodings.iter().any(|enc| &name == enc)
-                    || path_encoding_matches_project(&name, project))
+                    || path_encoding_matches_project(&name, project, home))
                     && entry.path().is_dir()
                 {
                     session_dirs.push(entry.path());
@@ -210,11 +220,17 @@ fn collect_codex(
     if !sessions_root.is_dir() {
         return;
     }
-    let mut files = Vec::new();
-    collect_jsonl_files(sessions_root, &mut files);
-    files.truncate(MAX_SESSION_FILES_PER_AGENT);
+    // Collect broadly first, then keep only sessions whose cwd matches this
+    // project (or a subdir). Cap *after* filtering so busy multi-project
+    // machines still mine older-but-relevant sessions for the current project.
+    let mut candidates = Vec::new();
+    collect_jsonl_files_uncapped(sessions_root, &mut candidates);
 
-    for file in files {
+    let mut matched = 0usize;
+    for file in candidates {
+        if matched >= MAX_SESSION_FILES_PER_AGENT {
+            break;
+        }
         let Ok(raw) = fs::read_to_string(&file) else {
             continue;
         };
@@ -242,6 +258,7 @@ fn collect_codex(
         if !belongs {
             continue;
         }
+        matched = matched.saturating_add(1);
         for line in raw.lines() {
             for cmd in extract_codex_commands(line) {
                 record_command(counts, &cmd, "codex");
@@ -267,22 +284,24 @@ fn collect_opencode(
 
     // Session directory or project worktree must match this project.
     // Query each path variant (canonical + as-given) because agents store either.
+    // Escape LIKE wildcards in the project path so `_` / `%` in directory names
+    // cannot match unrelated siblings.
     let Ok(mut stmt) = conn.prepare(
         "SELECT p.data
          FROM part p
          JOIN session s ON s.id = p.session_id
          LEFT JOIN project proj ON proj.id = s.project_id
          WHERE s.directory = ?1
-            OR s.directory LIKE ?2
+            OR s.directory LIKE ?2 ESCAPE '\\'
             OR proj.worktree = ?1
-            OR proj.worktree LIKE ?2",
+            OR proj.worktree LIKE ?2 ESCAPE '\\'",
     ) else {
         return;
     };
 
     for project in project_variants {
         let project_str = project.to_string_lossy().to_string();
-        let like = format!("{project_str}/%");
+        let like = format!("{}/%", escape_like_literal(&project_str));
         let Ok(rows) = stmt.query_map(rusqlite::params![project_str, like], |row| {
             row.get::<_, String>(0)
         }) else {
@@ -295,6 +314,21 @@ fn collect_opencode(
             }
         }
     }
+}
+
+/// Escape `\`, `%`, and `_` for use in a SQL LIKE pattern with `ESCAPE '\'`.
+fn escape_like_literal(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' | '%' | '_' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn scan_jsonl_file(
@@ -330,6 +364,27 @@ fn collect_jsonl_files(dir: &Path, out: &mut Vec<PathBuf>) {
         let path = entry.path();
         if path.is_dir() {
             collect_jsonl_files(&path, out);
+        } else if path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
+        {
+            out.push(path);
+        }
+    }
+}
+
+/// Like [`collect_jsonl_files`], but without an early cap — used when a later
+/// filter (e.g. Codex cwd match) decides which files count toward the budget.
+fn collect_jsonl_files_uncapped(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(|e| std::cmp::Reverse(e.metadata().ok().and_then(|m| m.modified().ok())));
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_jsonl_files_uncapped(&path, out);
         } else if path
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
@@ -490,6 +545,7 @@ fn is_shell_tool_name(name: &str) -> bool {
 
 fn record_command(counts: &mut BTreeMap<String, (u32, BTreeSet<String>)>, raw: &str, source: &str) {
     for cmd in normalize_and_split(raw) {
+        let cmd = redact_secrets(&cmd);
         if !feels_commandlike(&cmd) {
             continue;
         }
@@ -505,8 +561,10 @@ fn normalize_and_split(raw: &str) -> Vec<String> {
     if trimmed.is_empty() {
         return Vec::new();
     }
-    // Keep short compound commands intact; split long independent chains.
-    if trimmed.len() > 120 && (trimmed.contains("&&") || trimmed.contains(';')) {
+
+    // Always split `&&` / `;` chains so `cd <dir> && cargo test` yields the
+    // useful trailing command instead of being rejected as a bare `cd`.
+    let pieces: Vec<String> = if trimmed.contains("&&") || trimmed.contains(';') {
         trimmed
             .split("&&")
             .flat_map(|chunk| chunk.split(';'))
@@ -515,7 +573,124 @@ fn normalize_and_split(raw: &str) -> Vec<String> {
             .collect()
     } else {
         vec![collapse_ws(trimmed)]
+    };
+
+    pieces
+        .into_iter()
+        .filter_map(|piece| {
+            // Drop leading `cd <path>` navigation that agents often prefix.
+            let stripped = strip_leading_cd(&piece);
+            if stripped.is_empty() {
+                None
+            } else {
+                Some(stripped)
+            }
+        })
+        .collect()
+}
+
+fn strip_leading_cd(cmd: &str) -> String {
+    let mut rest = cmd;
+    loop {
+        let trimmed = rest.trim_start();
+        let Some(after_cd) = trimmed
+            .strip_prefix("cd ")
+            .or_else(|| trimmed.strip_prefix("cd\t"))
+        else {
+            return trimmed.to_string();
+        };
+        // Consume one path argument (quoted or bare), then continue if more
+        // leading cds remain (unusual but cheap to handle).
+        let after_cd = after_cd.trim_start();
+        rest = skip_one_shell_word(after_cd).trim_start();
+        if rest.is_empty() {
+            return String::new();
+        }
     }
+}
+
+fn skip_one_shell_word(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return s;
+    }
+    match bytes[0] {
+        b'\'' => {
+            if let Some(end) = s[1..].find('\'') {
+                &s[end + 2..]
+            } else {
+                ""
+            }
+        }
+        b'"' => {
+            if let Some(end) = s[1..].find('"') {
+                &s[end + 2..]
+            } else {
+                ""
+            }
+        }
+        _ => {
+            if let Some(idx) = s.find(char::is_whitespace) {
+                &s[idx..]
+            } else {
+                ""
+            }
+        }
+    }
+}
+
+/// Redact inline env assignments / tokens that look like secrets before a
+/// mined command is stored in `.qr/profile.json`.
+fn redact_secrets(cmd: &str) -> String {
+    cmd.split_whitespace()
+        .map(redact_token)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn redact_token(token: &str) -> String {
+    // `export NAME=value` / `NAME=value` forms.
+    if let Some((name, _value)) = token.split_once('=') {
+        let name = name.strip_prefix("export").unwrap_or(name);
+        let name = name.trim_start_matches(['\'', '"']);
+        if looks_secret_name(name) {
+            return format!("{name}=***");
+        }
+    }
+    // Bare high-entropy tokens (sk-..., ghp_..., etc.) as standalone args.
+    if looks_secret_literal(token) {
+        return "***".to_string();
+    }
+    token.to_string()
+}
+
+fn looks_secret_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    const NEEDLES: &[&str] = &[
+        "API_KEY",
+        "APIKEY",
+        "SECRET",
+        "TOKEN",
+        "PASSWORD",
+        "PASSWD",
+        "CREDENTIAL",
+        "ACCESS_KEY",
+        "PRIVATE_KEY",
+        "AUTH",
+        "BEARER",
+    ];
+    NEEDLES.iter().any(|n| upper.contains(n))
+}
+
+fn looks_secret_literal(token: &str) -> bool {
+    let t = token.trim_matches(['\'', '"']);
+    const PREFIXES: &[&str] = &[
+        "sk-", "sk_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "xoxb-", "xoxp-", "xoxa-", "AKIA",
+    ];
+    if PREFIXES.iter().any(|p| t.starts_with(p)) && t.len() >= 16 {
+        return true;
+    }
+    false
 }
 
 fn collapse_ws(s: &str) -> String {
@@ -723,11 +898,12 @@ fn pi_path_encodings(projects: &[PathBuf]) -> Vec<String> {
 }
 
 /// omp (Pi fork) often encodes paths relative to `$HOME` as `-Development-foo`.
-fn omp_path_encodings(projects: &[PathBuf]) -> Vec<String> {
+/// `home` must be snapshotted by the caller — do not re-read process env here
+/// (lib tests mutate `HOME` under a shared lock).
+fn omp_path_encodings(projects: &[PathBuf], home: Option<&Path>) -> Vec<String> {
     let mut out = pi_path_encodings(projects);
-    let home = env::var_os("HOME").map(PathBuf::from);
     for project in projects {
-        if let Some(home) = &home {
+        if let Some(home) = home {
             if let Ok(rel) = project.strip_prefix(home) {
                 let enc = format!("-{}", rel.to_string_lossy().replace('/', "-"));
                 if !out.contains(&enc) {
@@ -754,19 +930,22 @@ fn omp_path_encodings(projects: &[PathBuf]) -> Vec<String> {
     out
 }
 
-fn path_encoding_matches_project(encoded_dir: &str, project: &Path) -> bool {
+fn path_encoding_matches_project(encoded_dir: &str, project: &Path, home: Option<&Path>) -> bool {
     let variants = path_variants(project);
     let candidates = [
         claude_path_encodings(&variants),
         pi_path_encodings(&variants),
-        omp_path_encodings(&variants),
+        omp_path_encodings(&variants, home),
     ]
     .concat();
     candidates.iter().any(|c| c == encoded_dir)
 }
 
+/// True when `cwd` is the project itself or a subdirectory of it.
+/// Parent-directory sessions (monorepo root, `$HOME`, `/`) are intentionally
+/// excluded so their commands are not attributed to every child project.
 fn paths_related(cwd: &Path, project: &Path) -> bool {
-    cwd == project || cwd.starts_with(project) || project.starts_with(cwd)
+    cwd == project || cwd.starts_with(project)
 }
 
 fn shell_join(parts: &[&str]) -> String {
@@ -898,6 +1077,49 @@ mod tests {
     }
 
     #[test]
+    fn normalize_splits_short_cd_chains() {
+        let parts = normalize_and_split("cd /repo && cargo test");
+        assert_eq!(parts, vec!["cargo test".to_string()]);
+        let parts = normalize_and_split("cd '/tmp/proj'; pnpm build");
+        assert_eq!(parts, vec!["pnpm build".to_string()]);
+    }
+
+    #[test]
+    fn redact_secrets_masks_env_assignments_and_token_literals() {
+        assert_eq!(
+            redact_secrets("AWS_SECRET_ACCESS_KEY=deadbeef cargo test"),
+            "AWS_SECRET_ACCESS_KEY=*** cargo test"
+        );
+        assert_eq!(
+            redact_secrets("OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz cargo test"),
+            "OPENAI_API_KEY=*** cargo test"
+        );
+        assert_eq!(
+            redact_secrets("curl -H sk-abcdefghijklmnopqrstuvwxyz https://example.com"),
+            "curl -H *** https://example.com"
+        );
+        // Non-secret env assignments are preserved.
+        assert_eq!(
+            redact_secrets("RUST_BACKTRACE=1 cargo run"),
+            "RUST_BACKTRACE=1 cargo run"
+        );
+    }
+
+    #[test]
+    fn paths_related_excludes_parent_cwd() {
+        let project = Path::new("/workspace/app");
+        assert!(paths_related(Path::new("/workspace/app"), project));
+        assert!(paths_related(Path::new("/workspace/app/crates/x"), project));
+        assert!(!paths_related(Path::new("/workspace"), project));
+        assert!(!paths_related(Path::new("/"), project));
+    }
+
+    #[test]
+    fn escape_like_literal_escapes_wildcards() {
+        assert_eq!(escape_like_literal(r"a_b%c\d"), r"a\_b\%c\\d");
+    }
+
+    #[test]
     fn mines_claude_bash_tool_use() {
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join("proj");
@@ -911,6 +1133,8 @@ mod tests {
                 r#"{"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo test"}}]}}"#,
                 r#"{"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo test"}}]}}"#,
                 r#"{"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls -la"}}]}}"#,
+                r#"{"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cd /repo && cargo nextest run"}}]}}"#,
+                r#"{"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz cargo build"}}]}}"#,
             ],
         );
 
@@ -919,10 +1143,15 @@ mod tests {
             ..AgentHistoryRoots::default()
         };
         let mined = mine_for_project_with_roots(&project, &roots);
-        assert_eq!(mined.len(), 1);
-        assert_eq!(mined[0].command, "cargo test");
-        assert_eq!(mined[0].count, 2);
-        assert_eq!(mined[0].sources, vec!["claude".to_string()]);
+        let cmds: Vec<_> = mined.iter().map(|m| m.command.as_str()).collect();
+        assert!(cmds.contains(&"cargo test"), "{cmds:?}");
+        assert!(cmds.contains(&"cargo nextest run"), "{cmds:?}");
+        assert!(
+            cmds.iter()
+                .any(|c| c.contains("OPENAI_API_KEY=***") && c.contains("cargo build")),
+            "{cmds:?}"
+        );
+        assert!(!cmds.iter().any(|c| c.contains("sk-")), "{cmds:?}");
     }
 
     #[test]
@@ -945,8 +1174,8 @@ mod tests {
             ],
         );
 
-        // Point HOME so omp relative encoding resolves.
         let roots = AgentHistoryRoots {
+            home: Some(home.clone()),
             omp_sessions: Some(home.join(".omp/agent/sessions")),
             ..AgentHistoryRoots::default()
         };
@@ -994,6 +1223,19 @@ mod tests {
                 ),
                 r#"{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cargo clippy\"}"}}"#,
                 r#"{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"ls\"}"}}"#,
+            ],
+        );
+
+        // Parent-cwd session must not leak into this project's mined commands.
+        let parent = tmp.path().to_string_lossy();
+        let parent_file = sessions.join("2026/07/01/parent.jsonl");
+        write_jsonl(
+            &parent_file,
+            &[
+                &format!(
+                    r#"{{"type":"session_meta","payload":{{"cwd":"{parent}","session_id":"parent"}}}}"#
+                ),
+                r#"{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cargo build -p sibling\"}"}}"#,
             ],
         );
 
