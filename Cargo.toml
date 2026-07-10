@@ -58,6 +58,10 @@ name = "scan_bench"
 harness = false
 
 [[bench]]
+name = "cli_bench"
+harness = false
+
+[[bench]]
 name = "go_bench"
 harness = false
 
@@ -76,3 +80,8 @@ harness = false
 [[bench]]
 name = "shell_bench"
 harness = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

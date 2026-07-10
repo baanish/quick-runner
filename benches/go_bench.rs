@@ -21,9 +21,16 @@ fn go_benchmarks(c: &mut Criterion) {
         ("cache_miss", "does-not-exist"),
     ] {
         let fixture = common::go_fixture(1_000);
-        execute_group.bench_with_input(BenchmarkId::new(label, query), &fixture, |b, fixture| {
-            b.iter(|| execute(&fixture.config, query).ok());
-        });
+        {
+            let _env = common::scoped_env_var("QR_CONFIG_DIR", fixture.config_dir.as_os_str());
+            execute_group.bench_with_input(
+                BenchmarkId::new(label, query),
+                &fixture,
+                |b, fixture| {
+                    b.iter(|| execute(&fixture.config, query).ok());
+                },
+            );
+        }
     }
     execute_group.finish();
 }
