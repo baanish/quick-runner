@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use toml::Value as TomlValue;
 
+use crate::agent_history::{self, MinedCommand};
+
 const PROJECT_MARKERS: &[&str] = &[
     ".git",
     "package.json",
@@ -62,6 +64,9 @@ pub struct ProjectProfile {
     pub prefer_agent: Option<String>,
     #[serde(default)]
     pub entry_points: Vec<String>,
+    /// Commands mined from coding-agent session histories (opt-in via config).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_commands: Vec<MinedCommand>,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +100,15 @@ pub fn learn_current_dir() -> Result<LearnResult> {
     let mut profile = detect_profile(&project_root)?;
     apply_overrides(&project_root, &mut profile)?;
 
+    // Opt-in: mine bash/exec-like commands from coding agent session histories
+    // for this project folder. Default off; enabled via `[learn].mine_agent_history`
+    // or `QR_LEARN_MINE_AGENT_HISTORY`. Failures are swallowed so learn still
+    // succeeds when agent stores are missing or unreadable.
+    if mine_agent_history_enabled() {
+        let mined = agent_history::mine_for_project(&project_root);
+        agent_history::merge_mined_into_profile(&mut profile, mined);
+    }
+
     let profile_dir = project_root.join(".qr");
     fs::create_dir_all(&profile_dir)
         .with_context(|| format!("Failed to create {}", profile_dir.display()))?;
@@ -110,6 +124,23 @@ pub fn learn_current_dir() -> Result<LearnResult> {
         profile_path,
         profile,
     })
+}
+
+/// Whether `qr learn` should scan coding-agent session histories.
+///
+/// Resolution order: `QR_LEARN_MINE_AGENT_HISTORY` env override, then
+/// `config.toml` `[learn].mine_agent_history`, defaulting to `false` when the
+/// config is missing or unreadable (learn stays usable without init).
+pub fn mine_agent_history_enabled() -> bool {
+    if let Ok(value) = env::var("QR_LEARN_MINE_AGENT_HISTORY") {
+        return matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        );
+    }
+    crate::config::AppConfig::load()
+        .map(|cfg| cfg.learn.mine_agent_history)
+        .unwrap_or(false)
 }
 
 pub fn load_profile_from(root: &Path) -> Result<ProjectProfile> {
@@ -154,6 +185,7 @@ pub fn detect_profile(root: &Path) -> Result<ProjectProfile> {
             scripts: BTreeMap::new(),
             prefer_agent: None,
             entry_points: detect_entry_points(root, &["src/", "tests/", "docs/"]),
+            agent_commands: Vec::new(),
         }
     };
 
@@ -239,6 +271,7 @@ fn detect_node_profile(root: &Path) -> Result<ProjectProfile> {
                 "index.js",
             ],
         ),
+        agent_commands: Vec::new(),
     })
 }
 
@@ -317,6 +350,7 @@ fn detect_rust_profile(root: &Path) -> Result<ProjectProfile> {
         scripts,
         prefer_agent: None,
         entry_points: detect_entry_points(root, &["src/main.rs", "src/lib.rs", "src/bin/"]),
+        agent_commands: Vec::new(),
     })
 }
 
@@ -624,6 +658,7 @@ fn detect_python_profile(root: &Path) -> Result<ProjectProfile> {
         scripts,
         prefer_agent: None,
         entry_points: detect_entry_points(root, &["src/", "tests/", "docs/", "main.py", "app.py"]),
+        agent_commands: Vec::new(),
     })
 }
 
@@ -677,6 +712,7 @@ fn detect_go_profile(root: &Path) -> Result<ProjectProfile> {
         scripts,
         prefer_agent: None,
         entry_points: detect_entry_points(root, &["main.go", "cmd/", "internal/"]),
+        agent_commands: Vec::new(),
     })
 }
 

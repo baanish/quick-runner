@@ -1,3 +1,4 @@
+pub mod agent_history;
 pub mod ai;
 pub mod atomic;
 pub mod commands;

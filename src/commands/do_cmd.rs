@@ -234,6 +234,7 @@ mod tests {
             scripts: Default::default(),
             prefer_agent: Some("claude".into()),
             entry_points: vec![],
+            agent_commands: vec![],
         };
         let suggestions =
             build_delegate_suggestions(&AgentConfig::default(), "refactor auth", Some(&profile));
