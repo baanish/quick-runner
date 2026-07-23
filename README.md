@@ -4,7 +4,7 @@ QuickRunner (`qr`) is a fast Rust CLI for common developer shell workflows: jump
 
 ## Features
 
-- `qr go <project>` / `qr g`: fuzzy project lookup backed by a cached scanner (interactive picker on multiple matches)
+- `qr go <project>` / `qr g <project>`: fuzzy project lookup backed by a cached scanner; bare `qr go` / `qr g` opens a live filter picker
 - `qr run [--watch|--log|--output] <script>` / `qr r`: script runner with watch, log, and passthrough modes
 - `qr alias add|list|remove` / `qr a`: shell alias management
 - `qr stats` / `qr s`: aggregated command stats from a local SQLite database
@@ -23,7 +23,7 @@ qr init                  # config + shell wrapper + initial scan
 exec $SHELL              # reload so the `qr go` wrapper takes effect
 ```
 
-`qr init` appends a wrapper function to your shell rc file so `qr go` can change the parent shell's directory — a child process can't do that on its own. The wrapper calls `qr go --print-path` and runs the `cd` in your shell.
+`qr init` appends a wrapper function to your shell rc file so `qr go` can change the parent shell's directory — a child process can't do that on its own. The wrapper calls `qr go --print-path` and runs the `cd` in your shell; bare `qr g` now opens the live filter and still prints only the selected path for that wrapper.
 
 ## Config
 

@@ -19,6 +19,8 @@ adheres to [Semantic Versioning](https://semver.org/).
   `cargo run` / `go run .` when no runnable binary/root main package exists.
   Makefile `:=`/`?=` assignments and Justfile `set`/`export`/`alias` lines are
   skipped; Pipenv projects get a `pipenv run` prefix like uv/poetry/pdm.
+### Changed
+- Bare `qr go` / `qr g` now opens a lightweight live-filter picker for cached projects while `qr go <project>` keeps the existing direct lookup behavior.
 
 ## [0.1.0] - 2026-07-02
 
