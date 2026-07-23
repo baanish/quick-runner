@@ -1,5 +1,6 @@
 use std::{
     collections::HashSet,
+    ffi::OsStr,
     fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -19,6 +20,18 @@ const PROJECT_MARKERS: &[&str] = &[
     "requirements.txt",
     "Makefile",
 ];
+
+fn should_descend_directory_name(name: &OsStr) -> bool {
+    let is_hidden = name.as_encoded_bytes().first() == Some(&b'.');
+    !is_hidden && name != OsStr::new("node_modules")
+}
+
+fn should_descend(entry: &walkdir::DirEntry) -> bool {
+    if entry.depth() == 0 || !entry.file_type().is_dir() {
+        return true;
+    }
+    should_descend_directory_name(entry.file_name())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectEntry {
@@ -49,6 +62,7 @@ pub fn scan_projects(config: &AppConfig) -> Result<ProjectCache> {
             .min_depth(0)
             .max_depth(config.projects.scan_depth)
             .into_iter()
+            .filter_entry(should_descend)
             .filter_map(Result::ok)
             .filter(|entry| {
                 entry
@@ -222,6 +236,35 @@ mod tests {
     use super::*;
     use crate::config::AppConfig;
     use crate::test_env_lock;
+    use std::ffi::{OsStr, OsString};
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt;
+
+    struct EnvVarRestoreGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarRestoreGuard {
+        fn set(key: &'static str, value: &OsStr) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarRestoreGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
 
     #[test]
     fn scanner_uses_git_remote_name_when_available() {
@@ -377,6 +420,73 @@ mod tests {
         unsafe {
             std::env::remove_var("QR_CONFIG_DIR");
         }
+    }
+
+    #[test]
+    fn scan_projects_does_not_discover_projects_nested_under_hidden_directories() {
+        let _guard = test_env_lock().lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("dev");
+        let cfg_dir = tmp.path().join("cfg");
+        fs::create_dir_all(root.join(".hidden/visible-project")).unwrap();
+        fs::write(root.join(".hidden/visible-project/package.json"), "{}").unwrap();
+        let _env = EnvVarRestoreGuard::set("QR_CONFIG_DIR", cfg_dir.as_os_str());
+
+        let mut config = AppConfig::load_from_env_with_path(cfg_dir.join("config.toml")).unwrap();
+        config.projects.roots = vec![root.display().to_string()];
+        config.projects.scan_depth = 3;
+        config.stats.db_path = cfg_dir.join("stats.db").display().to_string();
+
+        let cache = scan_projects(&config).unwrap();
+        assert!(cache.projects.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_not_descend_into_non_utf8_hidden_directory_names() {
+        let _guard = test_env_lock().lock().unwrap();
+        let _original_env = EnvVarRestoreGuard::set("QR_CONFIG_DIR", OsStr::new("pre-existing"));
+        let tmp = tempfile::tempdir().unwrap();
+
+        {
+            let _env = EnvVarRestoreGuard::set("QR_CONFIG_DIR", tmp.path().as_os_str());
+            // macOS rejects invalid-byte path components, so exercise the exact
+            // descendant-directory name predicate that `should_descend` calls.
+            let visible_name = OsString::from_vec(b"visible-\xff".to_vec());
+            let hidden_name = OsString::from_vec(b".hidden-\xff".to_vec());
+
+            assert!(visible_name.to_str().is_none());
+            assert!(hidden_name.to_str().is_none());
+            assert!(should_descend_directory_name(&visible_name));
+            assert!(!should_descend_directory_name(&hidden_name));
+        }
+
+        assert_eq!(
+            std::env::var_os("QR_CONFIG_DIR"),
+            Some(OsString::from("pre-existing"))
+        );
+    }
+
+    #[test]
+    fn scan_projects_does_not_discover_projects_inside_node_modules() {
+        let _guard = test_env_lock().lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("dev");
+        let cfg_dir = tmp.path().join("cfg");
+        let app = root.join("app");
+        fs::create_dir_all(app.join("node_modules/dependency")).unwrap();
+        fs::write(app.join("package.json"), "{}").unwrap();
+        fs::write(app.join("node_modules/dependency/package.json"), "{}").unwrap();
+        let _env = EnvVarRestoreGuard::set("QR_CONFIG_DIR", cfg_dir.as_os_str());
+
+        let mut config = AppConfig::load_from_env_with_path(cfg_dir.join("config.toml")).unwrap();
+        config.projects.roots = vec![root.display().to_string()];
+        config.projects.scan_depth = 4;
+        config.stats.db_path = cfg_dir.join("stats.db").display().to_string();
+
+        let cache = scan_projects(&config).unwrap();
+        assert_eq!(cache.projects.len(), 1);
+        assert_eq!(cache.projects[0].path, app.display().to_string());
     }
 
     #[test]

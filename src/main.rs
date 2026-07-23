@@ -275,7 +275,7 @@ fn run_with_config(command: Commands) -> Result<ExitCode> {
 }
 
 fn record_stats(config: &AppConfig, stats: &CommandStats) -> Result<()> {
-    let db = StatsDb::open(&config.stats_db_path())?;
+    let db = StatsDb::open_for_telemetry(&config.stats_db_path())?;
     db.record(stats)
 }
 

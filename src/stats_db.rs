@@ -1,7 +1,10 @@
-use std::{fs, path::Path};
+use std::{fs, path::Path, time::Duration};
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
+
+const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(3);
+const TELEMETRY_BUSY_TIMEOUT: Duration = Duration::from_millis(5);
 
 #[derive(Debug, Clone, Default)]
 pub struct CommandStats {
@@ -35,13 +38,21 @@ pub struct StatsDb {
 
 impl StatsDb {
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with_busy_timeout(path, DEFAULT_BUSY_TIMEOUT)
+    }
+
+    pub fn open_for_telemetry(path: &Path) -> Result<Self> {
+        Self::open_with_busy_timeout(path, TELEMETRY_BUSY_TIMEOUT)
+    }
+
+    fn open_with_busy_timeout(path: &Path, busy_timeout: Duration) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         let connection = Connection::open(path)?;
         // Wait for a concurrent writer rather than failing immediately with
         // "database is locked" — several qr invocations can record at once.
-        connection.busy_timeout(std::time::Duration::from_secs(3))?;
+        connection.busy_timeout(busy_timeout)?;
         // WAL lets a reader (qr stats) run alongside a writer. Best-effort: it is
         // unsupported on some filesystems, and stats are non-critical.
         let _ = connection.pragma_update(None, "journal_mode", "WAL");
@@ -156,6 +167,23 @@ fn saturating_u64_from_f64(value: f64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn telemetry_record_fails_fast_when_another_writer_holds_the_database() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("stats.db");
+        drop(StatsDb::open(&path).unwrap());
+
+        let lock = Connection::open(&path).unwrap();
+        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let started = std::time::Instant::now();
+        let result =
+            StatsDb::open_for_telemetry(&path).and_then(|db| db.record(&CommandStats::default()));
+
+        assert!(result.is_err());
+        assert!(started.elapsed() < std::time::Duration::from_millis(250));
+    }
 
     #[test]
     fn stats_summary_aggregates_runs() {
