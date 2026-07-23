@@ -164,7 +164,10 @@ pub fn pick_index(options: &[String]) -> Result<Option<usize>> {
     loop {
         render_page(options, page, per_page, None)?;
         if let Event::Key(key) = event::read()? {
-            match key.code {
+            let Some(code) = numbered_picker_key_code(key) else {
+                continue;
+            };
+            match code {
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(None),
                 KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
                     let index = c.to_digit(10).unwrap() as usize - 1;
@@ -184,6 +187,10 @@ pub fn pick_index(options: &[String]) -> Result<Option<usize>> {
             }
         }
     }
+}
+
+fn numbered_picker_key_code(key: crossterm::event::KeyEvent) -> Option<KeyCode> {
+    should_handle_key_event(key.kind).then_some(key.code)
 }
 
 fn should_handle_key_event(kind: KeyEventKind) -> bool {
@@ -541,6 +548,23 @@ mod tests {
         assert!(should_handle_key_event(KeyEventKind::Press));
         assert!(should_handle_key_event(KeyEventKind::Repeat));
         assert!(!should_handle_key_event(KeyEventKind::Release));
+    }
+
+    #[test]
+    fn numbered_picker_ignores_key_release_events() {
+        let release = crossterm::event::KeyEvent::new_with_kind(
+            KeyCode::Char('1'),
+            KeyModifiers::empty(),
+            KeyEventKind::Release,
+        );
+        let press = crossterm::event::KeyEvent::new_with_kind(
+            KeyCode::Char('1'),
+            KeyModifiers::empty(),
+            KeyEventKind::Press,
+        );
+
+        assert_eq!(numbered_picker_key_code(release), None);
+        assert_eq!(numbered_picker_key_code(press), Some(KeyCode::Char('1')));
     }
 
     #[test]
