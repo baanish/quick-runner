@@ -458,6 +458,8 @@ mod tests {
 
     #[test]
     fn clear_test_env_removes_cross_endpoint_fallback_opt_in() {
+        // Must hold the shared env lock: mutating process env without it races
+        // other lib tests that read/write env vars (and poisons the lock on panic).
         let _guard = test_env_lock().lock().unwrap();
         unsafe {
             std::env::set_var(ALLOW_CROSS_ENDPOINT_FALLBACK_ENV, "true");

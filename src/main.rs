@@ -175,10 +175,11 @@ fn run_with_config(command: Commands) -> Result<ExitCode> {
     let execution = match command {
         Commands::Go(args) => {
             let query = args.project.join("-");
-            if query.is_empty() {
-                anyhow::bail!("project name required");
-            }
-            let result = commands::go::execute(&config, &query)?;
+            let result = if query.is_empty() {
+                commands::go::execute_live(&config)?
+            } else {
+                commands::go::execute(&config, &query)?
+            };
             interactive_ms = result.interactive_ms;
             print_go_result(&result, args.print_path)?;
             Ok(ExitCode::SUCCESS)
