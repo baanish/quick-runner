@@ -10,7 +10,7 @@ QuickRunner (`qr`) is a fast Rust CLI for common developer shell workflows: jump
 - `qr stats` / `qr s`: aggregated command stats from a local SQLite database
 - `qr scan` / `qr x`: manual project rescan
 - `qr do <task>` / `qr d`: natural language → a shell command (run only after explicit confirmation) or a suggested coding-agent hand-off
-- `qr learn` / `qr l`: profile the current project (language, package manager, scripts) into `./.qr/profile.json`
+- `qr learn` / `qr l`: profile the current project (language, package manager, common build/test/dev/run/debug commands, scripts) into `./.qr/profile.json`
 - `qr config` / `qr c`: open `config.toml` in your editor (`qr config path` prints its location)
 - `qr doctor`: report the health and location of the config and project cache
 - `qr init` / `qr i`: creates config, installs the shell wrapper, optionally stores your AI key in the OS keychain, prompts to install an hourly rescan cron (default no), and runs an initial scan

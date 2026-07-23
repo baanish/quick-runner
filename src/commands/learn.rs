@@ -28,6 +28,15 @@ pub fn print_summary(result: &LearnResult) {
     if let Some(lint_command) = &result.profile.lint_command {
         println!("  → Lint: {lint_command}");
     }
+    if let Some(dev_command) = &result.profile.dev_command {
+        println!("  → Dev: {dev_command}");
+    }
+    if let Some(run_command) = &result.profile.run_command {
+        println!("  → Run: {run_command}");
+    }
+    if let Some(debug_command) = &result.profile.debug_command {
+        println!("  → Debug: {debug_command}");
+    }
     if !result.profile.scripts.is_empty() {
         let names = result.profile.scripts.keys().cloned().collect::<Vec<_>>();
         println!("  → Scripts: {}", names.join(", "));
