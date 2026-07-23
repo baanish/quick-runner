@@ -13,6 +13,42 @@ pub struct GoResult {
     pub interactive_ms: u128,
 }
 
+pub fn execute_live(config: &AppConfig) -> Result<GoResult> {
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return Err(anyhow!("project name required"));
+    }
+
+    let cache = load_or_scan_projects(config)?;
+    let labels = cache
+        .projects
+        .iter()
+        .map(live_project_choice_label)
+        .collect::<Vec<_>>();
+    let picker_start = std::time::Instant::now();
+    let selected = project_at_picker_index(&cache.projects, picker::pick_live_index(&labels)?)?;
+
+    Ok(GoResult {
+        path: selected.path,
+        interactive_ms: picker_start.elapsed().as_millis(),
+    })
+}
+
+fn project_at_picker_index(
+    projects: &[ProjectEntry],
+    index: Option<usize>,
+) -> Result<ProjectEntry> {
+    if projects.is_empty() {
+        return Err(anyhow!("No projects found. Run `qr scan` to refresh."));
+    }
+    let Some(index) = index else {
+        return Err(anyhow!("Selection cancelled"));
+    };
+    projects
+        .get(index)
+        .cloned()
+        .ok_or_else(|| anyhow!("Selection cancelled"))
+}
+
 pub fn execute(config: &AppConfig, query: &str) -> Result<GoResult> {
     let cache = load_or_scan_projects(config)?;
     let matches = rank_matches(&cache.projects, query);
@@ -50,6 +86,14 @@ pub fn execute(config: &AppConfig, query: &str) -> Result<GoResult> {
 fn project_choice_label(entry: &ProjectEntry) -> String {
     format!(
         "{} ({})",
+        terminal::escape_untrusted(&entry.name),
+        terminal::escape_untrusted(&entry.path)
+    )
+}
+
+fn live_project_choice_label(entry: &ProjectEntry) -> String {
+    format!(
+        "{}\t{}",
         terminal::escape_untrusted(&entry.name),
         terminal::escape_untrusted(&entry.path)
     )
@@ -213,6 +257,20 @@ mod tests {
     }
 
     #[test]
+    fn live_project_choice_label_keeps_parenthesized_paths_unambiguous() {
+        let entry = ProjectEntry {
+            name: "demo".into(),
+            path: r"C:\Program Files (x86)\demo".into(),
+            source: "git".into(),
+        };
+
+        assert_eq!(
+            live_project_choice_label(&entry),
+            "demo\tC:\\Program Files (x86)\\demo"
+        );
+    }
+
+    #[test]
     fn multiple_match_names_escape_terminal_controls() {
         let entries = vec![
             ProjectEntry {
@@ -227,5 +285,24 @@ mod tests {
             },
         ];
         assert_eq!(multiple_match_names(&entries), "one\\u{1b}[2J, two\\u{7}");
+    }
+
+    #[test]
+    fn project_at_selected_live_index_returns_matching_project() {
+        let projects = sample_projects();
+
+        let selected = project_at_picker_index(&projects, Some(1)).unwrap();
+
+        assert_eq!(selected.name, "orion-api");
+    }
+
+    #[test]
+    fn project_at_selected_live_index_reports_empty_project_cache() {
+        let error = project_at_picker_index(&[], None).unwrap_err();
+
+        assert!(
+            error.to_string().contains("No projects found"),
+            "unexpected error: {error:#}"
+        );
     }
 }
