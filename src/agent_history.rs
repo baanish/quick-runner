@@ -1112,7 +1112,17 @@ fn redact_inline_context_token(
 
 fn is_auth_header(token: &str) -> bool {
     let token = token.trim_matches(['\'', '"']).to_ascii_lowercase();
-    token.starts_with("authorization:") || token.starts_with("proxy-authorization:")
+    [
+        "authorization:",
+        "proxy-authorization:",
+        "x-api-key:",
+        "api-key:",
+        "x-auth-token:",
+        "cookie:",
+        "set-cookie:",
+    ]
+    .iter()
+    .any(|prefix| token.starts_with(prefix))
 }
 
 fn shell_word_spans(cmd: &str) -> Vec<(usize, usize)> {
@@ -1192,7 +1202,7 @@ fn contains_url_userinfo(token: &str) -> bool {
 }
 
 fn looks_secret_name(name: &str) -> bool {
-    let upper = name.to_ascii_uppercase();
+    let normalized = name.to_ascii_uppercase().replace('-', "_");
     const NEEDLES: &[&str] = &[
         "API_KEY",
         "APIKEY",
@@ -1206,7 +1216,7 @@ fn looks_secret_name(name: &str) -> bool {
         "AUTH",
         "BEARER",
     ];
-    NEEDLES.iter().any(|n| upper.contains(n))
+    NEEDLES.iter().any(|needle| normalized.contains(needle))
 }
 
 fn looks_secret_literal(token: &str) -> bool {
@@ -1815,6 +1825,14 @@ mod tests {
         assert_eq!(
             redact_secrets("env -C /tmp curl -u alice:hunter2 https://example.com"),
             "env -C /tmp curl -u *** https://example.com"
+        );
+        assert_eq!(
+            redact_secrets(r#"curl -H "X-API-Key: opaque-secret" https://example.com"#),
+            "curl -H *** https://example.com"
+        );
+        assert_eq!(
+            redact_secrets(r#"curl --header "Cookie: session=opaque-secret" https://example.com"#),
+            "curl --header *** https://example.com"
         );
         // Non-secret env assignments are preserved.
         assert_eq!(
