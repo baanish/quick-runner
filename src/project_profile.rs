@@ -941,7 +941,7 @@ fn go_race_detector_supported(build_context: &GoBuildContext) -> bool {
     let target_supported = match build_context.goos.as_str() {
         "linux" => matches!(
             build_context.goarch.as_str(),
-            "amd64" | "arm64" | "loong64" | "ppc64le" | "riscv64" | "s390x"
+            "amd64" | "arm64" | "loong64" | "ppc64le" | "s390x"
         ),
         "darwin" => matches!(build_context.goarch.as_str(), "amd64" | "arm64"),
         "freebsd" | "netbsd" | "windows" => build_context.goarch == "amd64",
@@ -2443,6 +2443,15 @@ required-features = ["cli"]
             Some(false)
         )));
         assert!(go_race_detector_supported(&go_build_context(
+            "linux",
+            "loong64",
+            Some(true)
+        )));
+    }
+
+    #[test]
+    fn go_race_detector_rejects_linux_riscv64() {
+        assert!(!go_race_detector_supported(&go_build_context(
             "linux",
             "riscv64",
             Some(true)
