@@ -252,7 +252,7 @@ fn numbered_picker_hint(total: usize, page: usize, per_page: usize) -> String {
     if pages > 1 {
         let (start, end) = numbered_page_range(total, page, per_page);
         format!(
-            "Page {}/{} ({}-{} of {total}). ←/→ or n/p to change page. Press 1-9, ESC, or q.",
+            "Page {}/{} ({}-{} of {total}). ←/→ ↑/↓ PgUp/PgDn or n/p to change page. Press 1-9, ESC, or q.",
             page + 1,
             pages,
             start + 1,
@@ -636,7 +636,7 @@ mod tests {
         assert_eq!(numbered_picker_header(24), "Multiple matches found (24):");
         assert_eq!(
             numbered_picker_hint(24, 1, 9),
-            "Page 2/3 (10-18 of 24). ←/→ or n/p to change page. Press 1-9, ESC, or q."
+            "Page 2/3 (10-18 of 24). ←/→ ↑/↓ PgUp/PgDn or n/p to change page. Press 1-9, ESC, or q."
         );
         assert_eq!(numbered_picker_hint(6, 0, 9), "Press 1-9, ESC, or q.");
     }

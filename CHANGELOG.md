@@ -20,7 +20,8 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 - `qr go <query>` no longer silently drops matches after the first 9. The
-  numbered picker paginates (←/→ or n/p) and shows the current page and total.
+  numbered picker paginates (←/→, ↑/↓, PgUp/PgDn, or n/p) and shows the
+  current page and total.
 - `qr learn` no longer treats plain `main.py` as FastAPI, invents `next lint`,
   PM-qualifies Makefile/Justfile role commands on Node projects, or records
   `cargo run` / `go run .` when no runnable binary/root main package exists.
