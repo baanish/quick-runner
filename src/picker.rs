@@ -13,6 +13,7 @@ const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_BOLD: &str = "\x1b[1m";
 const ANSI_DIM: &str = "\x1b[2m";
 const ANSI_CYAN: &str = "\x1b[36m";
+const NUMBERED_PER_PAGE: usize = 9;
 
 /// Restores the terminal (cursor + cooked mode) on every exit path — including
 /// early `?` errors and panics — so a crash mid-pick can never leave the user's
@@ -159,7 +160,7 @@ pub fn pick_index(options: &[String]) -> Result<Option<usize>> {
     let _guard = RawModeGuard::enter()?;
 
     let mut page = 0usize;
-    let per_page = 9usize;
+    let per_page = NUMBERED_PER_PAGE;
 
     loop {
         render_page(options, page, per_page, None)?;
@@ -171,17 +172,26 @@ pub fn pick_index(options: &[String]) -> Result<Option<usize>> {
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(None),
                 KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
                     let index = c.to_digit(10).unwrap() as usize - 1;
-                    let absolute = page * per_page + index;
-                    if absolute < options.len() {
+                    if let Some(absolute) =
+                        numbered_absolute_index(page, per_page, index, options.len())
+                    {
                         render_page(options, page, per_page, Some(absolute))?;
                         return Ok(Some(absolute));
                     }
                 }
-                KeyCode::Right | KeyCode::Down if (page + 1) * per_page < options.len() => {
-                    page += 1;
+                KeyCode::Right
+                | KeyCode::Down
+                | KeyCode::PageDown
+                | KeyCode::Char('n')
+                | KeyCode::Char('N') => {
+                    page = next_numbered_page(page, options.len(), per_page);
                 }
-                KeyCode::Left | KeyCode::Up if page > 0 => {
-                    page -= 1;
+                KeyCode::Left
+                | KeyCode::Up
+                | KeyCode::PageUp
+                | KeyCode::Char('p')
+                | KeyCode::Char('P') => {
+                    page = previous_numbered_page(page);
                 }
                 _ => {}
             }
@@ -191,6 +201,66 @@ pub fn pick_index(options: &[String]) -> Result<Option<usize>> {
 
 fn numbered_picker_key_code(key: crossterm::event::KeyEvent) -> Option<KeyCode> {
     should_handle_key_event(key.kind).then_some(key.code)
+}
+
+fn numbered_page_count(total: usize, per_page: usize) -> usize {
+    if total == 0 || per_page == 0 {
+        0
+    } else {
+        total.div_ceil(per_page)
+    }
+}
+
+fn numbered_page_range(total: usize, page: usize, per_page: usize) -> (usize, usize) {
+    let start = page.saturating_mul(per_page);
+    if start >= total {
+        (total, total)
+    } else {
+        (start, total.min(start + per_page))
+    }
+}
+
+fn numbered_absolute_index(
+    page: usize,
+    per_page: usize,
+    display_index: usize,
+    total: usize,
+) -> Option<usize> {
+    let absolute = page.saturating_mul(per_page).saturating_add(display_index);
+    (absolute < total).then_some(absolute)
+}
+
+fn next_numbered_page(page: usize, total: usize, per_page: usize) -> usize {
+    let next = page.saturating_add(1);
+    if numbered_page_range(total, next, per_page).0 < total {
+        next
+    } else {
+        page
+    }
+}
+
+fn previous_numbered_page(page: usize) -> usize {
+    page.saturating_sub(1)
+}
+
+fn numbered_picker_header(total: usize) -> String {
+    format!("Multiple matches found ({total}):")
+}
+
+fn numbered_picker_hint(total: usize, page: usize, per_page: usize) -> String {
+    let pages = numbered_page_count(total, per_page);
+    if pages > 1 {
+        let (start, end) = numbered_page_range(total, page, per_page);
+        format!(
+            "Page {}/{} ({}-{} of {total}). ←/→ or n/p to change page. Press 1-9, ESC, or q.",
+            page + 1,
+            pages,
+            start + 1,
+            end
+        )
+    } else {
+        "Press 1-9, ESC, or q.".to_string()
+    }
 }
 
 fn should_handle_key_event(kind: KeyEventKind) -> bool {
@@ -257,15 +327,14 @@ fn render_page(
     selected_absolute: Option<usize>,
 ) -> Result<()> {
     let mut stderr = io::stderr();
-    let start = page * per_page;
-    let end = options.len().min(start + per_page);
+    let (start, end) = numbered_page_range(options.len(), page, per_page);
 
     execute!(
         stderr,
         terminal::Clear(ClearType::All),
         cursor::MoveTo(0, 0)
     )?;
-    write!(stderr, "Multiple matches found:\r\n")?;
+    write!(stderr, "{}\r\n", numbered_picker_header(options.len()))?;
     for (display_index, value) in options[start..end].iter().enumerate() {
         let absolute = start + display_index;
         let marker = if selected_absolute == Some(absolute) {
@@ -275,14 +344,11 @@ fn render_page(
         };
         write!(stderr, "{marker} {}) {}\r\n", display_index + 1, value)?;
     }
-    if end < options.len() || page > 0 {
-        write!(
-            stderr,
-            "Use arrows to change page. Press 1-9, ESC, or q.\r\n"
-        )?;
-    } else {
-        write!(stderr, "Press 1-9, ESC, or q.\r\n")?;
-    }
+    write!(
+        stderr,
+        "{}\r\n",
+        numbered_picker_hint(options.len(), page, per_page)
+    )?;
     stderr.flush()?;
     Ok(())
 }
@@ -548,6 +614,31 @@ mod tests {
         assert!(should_handle_key_event(KeyEventKind::Press));
         assert!(should_handle_key_event(KeyEventKind::Repeat));
         assert!(!should_handle_key_event(KeyEventKind::Release));
+    }
+
+    #[test]
+    fn numbered_picker_pages_keep_single_digit_selection() {
+        assert_eq!(numbered_page_count(24, 9), 3);
+        assert_eq!(numbered_page_range(24, 0, 9), (0, 9));
+        assert_eq!(numbered_page_range(24, 1, 9), (9, 18));
+        assert_eq!(numbered_page_range(24, 2, 9), (18, 24));
+        assert_eq!(numbered_absolute_index(1, 9, 0, 24), Some(9));
+        assert_eq!(numbered_absolute_index(2, 9, 5, 24), Some(23));
+        assert_eq!(numbered_absolute_index(2, 9, 6, 24), None);
+        assert_eq!(next_numbered_page(0, 24, 9), 1);
+        assert_eq!(next_numbered_page(2, 24, 9), 2);
+        assert_eq!(previous_numbered_page(0), 0);
+        assert_eq!(previous_numbered_page(2), 1);
+    }
+
+    #[test]
+    fn numbered_picker_hint_includes_page_position_when_paginated() {
+        assert_eq!(numbered_picker_header(24), "Multiple matches found (24):");
+        assert_eq!(
+            numbered_picker_hint(24, 1, 9),
+            "Page 2/3 (10-18 of 24). ←/→ or n/p to change page. Press 1-9, ESC, or q."
+        );
+        assert_eq!(numbered_picker_hint(6, 0, 9), "Press 1-9, ESC, or q.");
     }
 
     #[test]
