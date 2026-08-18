@@ -809,6 +809,44 @@ fn go_print_path_writes_only_the_path_to_stdout() {
 }
 
 #[test]
+fn go_noninteractive_lists_every_match_past_one_page() {
+    let _guard = env_lock().lock().unwrap();
+    clear_test_env();
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_dir = tmp.path().join("cfg");
+    fs::create_dir_all(&cfg_dir).unwrap();
+    unsafe {
+        std::env::set_var("QR_CONFIG_DIR", &cfg_dir);
+    }
+
+    let projects = (0..15)
+        .map(|index| {
+            format!(r#"{{"name":"vibe-{index:02}","path":"/tmp/vibe-{index:02}","source":"git"}}"#)
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    fs::write(
+        cfg_dir.join("projects-cache.json"),
+        format!(r#"{{"scanned_at_unix_ms":1,"projects":[{projects}]}}"#),
+    )
+    .unwrap();
+
+    let mut assertion = Command::cargo_bin("qr")
+        .unwrap()
+        .args(["go", "vibe"])
+        .assert()
+        .failure()
+        .stderr(contains("Multiple matches for 'vibe'"));
+    for index in 0..15 {
+        assertion = assertion.stderr(contains(format!("vibe-{index:02}")));
+    }
+
+    unsafe {
+        std::env::remove_var("QR_CONFIG_DIR");
+    }
+}
+
+#[test]
 fn run_executes_positional_script_with_mode_flag() {
     let _guard = env_lock().lock().unwrap();
     clear_test_env();

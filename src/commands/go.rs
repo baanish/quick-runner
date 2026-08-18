@@ -136,11 +136,7 @@ pub fn rank_matches(entries: &[ProjectEntry], query: &str) -> Vec<ProjectEntry> 
         .collect::<Vec<_>>();
 
     scored.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.name.cmp(&right.1.name)));
-    let results: Vec<ProjectEntry> = scored
-        .into_iter()
-        .take(9)
-        .map(|(_, entry)| entry.clone())
-        .collect();
+    let results: Vec<ProjectEntry> = scored.into_iter().map(|(_, entry)| entry.clone()).collect();
 
     // If strict matching found nothing, try bigram similarity for typos/transpositions
     if results.is_empty() && lower_query.len() >= 3 {
@@ -161,7 +157,6 @@ pub fn rank_matches(entries: &[ProjectEntry], query: &str) -> Vec<ProjectEntry> 
         fallback.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         return fallback
             .into_iter()
-            .take(9)
             .map(|(_, entry)| entry.clone())
             .collect();
     }
@@ -231,6 +226,22 @@ mod tests {
         let matches = rank_matches(&sample_projects(), "orion");
         assert_eq!(matches.len(), 2);
         assert!(matches.iter().all(|entry| entry.name.starts_with("orion")));
+    }
+
+    #[test]
+    fn substring_matches_are_not_capped_at_one_picker_page() {
+        let projects = (0..15)
+            .map(|index| ProjectEntry {
+                name: format!("vibe-{index:02}"),
+                path: format!("/dev/vibe-{index:02}"),
+                source: "git".into(),
+            })
+            .collect::<Vec<_>>();
+
+        let matches = rank_matches(&projects, "vibe");
+
+        assert_eq!(matches.len(), 15);
+        assert!(matches.iter().all(|entry| entry.name.contains("vibe")));
     }
 
     #[test]
